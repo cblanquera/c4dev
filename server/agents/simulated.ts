@@ -2,15 +2,18 @@
  * A deterministic stand-in for real agents. It plans from the description's
  * bullet points, writes real files into the worktree (so commits, diffs and
  * merges are genuine), raises one audit finding on the first pass, and
- * escalates to a human when a task mentions credentials. Use it to try the
- * factory without spending tokens, and in tests.
+ * escalates to a human when a task mentions credentials. Its assistant reads
+ * common phrasings deterministically (see `simulated-assistant.ts`). Use it to
+ * try the factory without spending tokens, and in tests.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { recordedDelivery } from '../delivery.ts';
+import { run, shellQuote } from '../shell.ts';
 import { settings } from '../settings.ts';
+import { simulateAssistant, type AssistantInput } from './simulated-assistant.ts';
 import type {
-  AgentContext, ApprovalDecision, AuditResult, CoordinatorReply, Driver, InstructionEvent, PlannedSubtask, WorkResult,
+  AgentContext, ApprovalDecision, AssistantReply, AuditResult, CoordinatorReply, Driver, InstructionEvent, PlannedSubtask, WorkResult,
 } from './driver.ts';
 import type { Card, Comment, Subtask } from '../types.ts';
 
@@ -115,6 +118,17 @@ export class SimulatedDriver implements Driver {
       };
     }
 
+    // Merge subtasks really merge, keeping this card's side of any conflict, so conflicts resolve without tokens.
+    const mergeRef = subtask.kind === 'merge' ? subtask.instructions.match(/git merge ([\w./-]+)`/)?.[1] : undefined;
+    if (mergeRef) {
+      ctx.log('oneliner', `$ git merge ${mergeRef}`);
+      const res = await run(`git -c user.name='Software Factory' -c user.email=factory@localhost merge --no-commit --no-ff -X ours ${shellQuote(mergeRef)}`, { cwd, signal: ctx.signal });
+      ctx.signal.throwIfAborted();
+      if (res.code !== 0) throw new Error(`Could not merge ${mergeRef}:\n${res.output}`);
+      ctx.log('summary', `Merged ${mergeRef}, keeping this task's side of each conflict.`);
+      return { summary: `Merged ${mergeRef} and resolved the conflicts in favour of this task's changes.` };
+    }
+
     ctx.log('oneliner', 'Glob src/**/*');
     await sleep(400, ctx.signal);
 
@@ -175,7 +189,7 @@ export class SimulatedDriver implements Driver {
     await sleep(200, ctx.signal);
     ctx.signal.throwIfAborted();
     const checks = [...new Set(input.verification.split('\n').filter(Boolean))].map((line) => `- ${line}`).join('\n');
-    return recordedDelivery(input.card, input.subtasks, [], settings()).replace('No passing verification results recorded yet.', checks || 'No passing verification results recorded yet.');
+    return recordedDelivery(input.card, input.subtasks, [], settings(input.card.projectId)).replace('No passing verification results recorded yet.', checks || 'No passing verification results recorded yet.');
   }
 
   async reply(input: { card: Card; thread: Comment[]; deliveryNotes: string }, ctx: AgentContext): Promise<CoordinatorReply> {
@@ -205,5 +219,12 @@ export class SimulatedDriver implements Driver {
       return answer(input.deliveryNotes || 'Review details will appear here after verification and acceptance. There is no recorded preview URL or test account yet.');
     }
     return answer(`Card #${input.card.id} is in ${input.card.stage.replaceAll('_', ' ')}. I can explain the recorded work or draft a follow-up in the Icebox. What would you like to know?`);
+  }
+
+  /** Deterministic reading of everyday phrasing; see `simulated-assistant.ts`. */
+  async assist(input: AssistantInput, ctx: AgentContext): Promise<AssistantReply> {
+    await sleep(300, ctx.signal);
+    ctx.signal.throwIfAborted();
+    return simulateAssistant(input);
   }
 }

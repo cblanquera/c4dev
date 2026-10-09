@@ -5,9 +5,10 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { emit } from './events.ts';
+import { STAGE_LABELS } from './types.ts';
 import type {
-  Card, Comment, CommentAuthor, CommentKind, LogEntry, LogLevel, Settings, Stage, Subtask,
-  SubtaskKind,
+  AssistantMessage, AssistantMessageKind, Card, Comment, CommentAuthor, CommentKind, LogEntry, LogLevel, Settings,
+  Stage, Subtask, SubtaskKind,
 } from './types.ts';
 
 type Row = Record<string, any>;
@@ -15,6 +16,7 @@ type Row = Record<string, any>;
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS cards (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL DEFAULT 1,
   description TEXT NOT NULL DEFAULT '',
   instructions TEXT NOT NULL DEFAULT '',
   instructions_hash TEXT,
@@ -35,7 +37,10 @@ CREATE TABLE IF NOT EXISTS cards (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   stage_changed_at INTEGER NOT NULL,
-  completed_at INTEGER
+  completed_at INTEGER,
+  merge_state TEXT,
+  merge_note TEXT NOT NULL DEFAULT '',
+  merging INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS subtasks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,11 +79,27 @@ CREATE TABLE IF NOT EXISTS comments (
   author TEXT NOT NULL,
   kind TEXT NOT NULL,
   body TEXT NOT NULL,
+  via TEXT,
   ts INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS projects (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  settings TEXT NOT NULL DEFAULT '{}',
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS assistant_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  author TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  body TEXT NOT NULL,
+  card_ids TEXT NOT NULL DEFAULT '[]',
+  details TEXT NOT NULL DEFAULT '',
+  ts INTEGER NOT NULL
 );
 `;
 
@@ -88,6 +109,18 @@ export function openDb(file: string): void {
   db = new DatabaseSync(file);
   db.exec('PRAGMA journal_mode = WAL;');
   db.exec(SCHEMA);
+  // Databases from before projects existed: their cards belong to the first project.
+  addColumn('cards', 'project_id', 'project_id INTEGER NOT NULL DEFAULT 1');
+  addColumn('comments', 'via', 'via TEXT');
+  addColumn('cards', 'merge_state', 'merge_state TEXT');
+  addColumn('cards', 'merge_note', "merge_note TEXT NOT NULL DEFAULT ''");
+  addColumn('cards', 'merging', 'merging INTEGER NOT NULL DEFAULT 0');
+  db.exec('CREATE INDEX IF NOT EXISTS cards_project ON cards(project_id, stage, position);');
+}
+
+function addColumn(table: string, column: string, ddl: string): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Row[];
+  if (!columns.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
 }
 
 export function closeDb(): void {
@@ -123,6 +156,7 @@ export function deriveTitle(markdown: string): string {
 function toCard(r: Row): Card {
   return {
     id: r.id,
+    projectId: r.project_id,
     title: deriveTitle(r.description),
     description: r.description,
     instructions: r.instructions,
@@ -147,11 +181,18 @@ function toCard(r: Row): Card {
     updatedAt: r.updated_at,
     stageChangedAt: r.stage_changed_at,
     completedAt: r.completed_at,
+    mergeState: r.merge_state ?? null,
+    mergeNote: r.merge_note ?? '',
+    merging: !!r.merging,
   };
 }
 
-export function listCards(): Card[] {
-  return (db.prepare('SELECT * FROM cards ORDER BY stage, position').all() as Row[]).map(toCard);
+/** Every card, or one project's cards. */
+export function listCards(projectId?: number): Card[] {
+  const rows = projectId == null
+    ? db.prepare('SELECT * FROM cards ORDER BY stage, position').all()
+    : db.prepare('SELECT * FROM cards WHERE project_id = ? ORDER BY stage, position').all(projectId);
+  return (rows as Row[]).map(toCard);
 }
 
 export function getCard(id: number): Card | undefined {
@@ -159,26 +200,27 @@ export function getCard(id: number): Card | undefined {
   return r && toCard(r);
 }
 
-export function cardsInStage(stage: Stage): Card[] {
-  return (db.prepare('SELECT * FROM cards WHERE stage = ? ORDER BY position').all(stage) as Row[]).map(toCard);
+export function cardsInStage(projectId: number, stage: Stage): Card[] {
+  return (db.prepare('SELECT * FROM cards WHERE project_id = ? AND stage = ? ORDER BY position').all(projectId, stage) as Row[]).map(toCard);
 }
 
-function edgePosition(stage: Stage, edge: 'top' | 'bottom'): number {
+/** Columns are per project, so positions are too. */
+function edgePosition(projectId: number, stage: Stage, edge: 'top' | 'bottom'): number {
   const r = db
-    .prepare(`SELECT ${edge === 'top' ? 'MIN' : 'MAX'}(position) AS p FROM cards WHERE stage = ?`)
-    .get(stage) as Row;
+    .prepare(`SELECT ${edge === 'top' ? 'MIN' : 'MAX'}(position) AS p FROM cards WHERE project_id = ? AND stage = ?`)
+    .get(projectId, stage) as Row;
   if (r.p == null) return 0;
   return edge === 'top' ? r.p - 1 : r.p + 1;
 }
 
-export function createCard(input: { description: string; instructions: string; instructionsHash: string | null; parentId?: number | null }): Card {
+export function createCard(input: { projectId: number; description: string; instructions: string; instructionsHash: string | null; parentId?: number | null }): Card {
   const t = now();
   const res = db
     .prepare(
-      `INSERT INTO cards (description, instructions, instructions_hash, stage, position, parent_id, created_at, updated_at, stage_changed_at)
-       VALUES (?, ?, ?, 'icebox', ?, ?, ?, ?, ?)`,
+      `INSERT INTO cards (project_id, description, instructions, instructions_hash, stage, position, parent_id, created_at, updated_at, stage_changed_at)
+       VALUES (?, ?, ?, ?, 'icebox', ?, ?, ?, ?, ?)`,
     )
-    .run(input.description, input.instructions, input.instructionsHash, edgePosition('icebox', 'top'), input.parentId ?? null, t, t, t);
+    .run(input.projectId, input.description, input.instructions, input.instructionsHash, edgePosition(input.projectId, 'icebox', 'top'), input.parentId ?? null, t, t, t);
   return publishCard(Number(res.lastInsertRowid))!;
 }
 
@@ -197,9 +239,12 @@ const CARD_COLUMNS: Record<string, string> = {
   resumeStage: 'resume_stage',
   hidden: 'hidden',
   position: 'position',
+  mergeState: 'merge_state',
+  mergeNote: 'merge_note',
+  merging: 'merging',
 };
 
-export type CardPatch = Partial<Pick<Card, 'description' | 'instructions' | 'instructionsHash' | 'status' | 'statusText' | 'branch' | 'worktree' | 'loops' | 'coverage' | 'acceptanceReady' | 'deliverableKind' | 'resumeStage' | 'hidden' | 'position'>>;
+export type CardPatch = Partial<Pick<Card, 'description' | 'instructions' | 'instructionsHash' | 'status' | 'statusText' | 'branch' | 'worktree' | 'loops' | 'coverage' | 'acceptanceReady' | 'deliverableKind' | 'resumeStage' | 'hidden' | 'position' | 'mergeState' | 'mergeNote' | 'merging'>>;
 
 export function updateCard(id: number, patch: CardPatch): Card | undefined {
   const sets: string[] = [];
@@ -221,12 +266,14 @@ export function setStatus(id: number, status: string, statusText: string): Card 
 
 /**
  * Moves a card to a stage. `position` may be an explicit sort value, or
- * 'top'/'bottom' of the destination column.
+ * 'top'/'bottom' of the destination column. Every stage change is logged here,
+ * with its reason, so a card's history can be audited in one place.
  */
-export function moveCard(id: number, stage: Stage, position: number | 'top' | 'bottom' = 'top'): Card | undefined {
+export function moveCard(id: number, stage: Stage, position: number | 'top' | 'bottom' = 'top', reason = ''): Card | undefined {
   const card = getCard(id);
   if (!card) return undefined;
-  const pos = typeof position === 'number' ? position : edgePosition(stage, position);
+  if (card.stage !== stage) addLog(id, null, 'coordinator', 'summary', `**${STAGE_LABELS[card.stage]} → ${STAGE_LABELS[stage]}**${reason ? `: ${reason}` : ''}`);
+  const pos = typeof position === 'number' ? position : edgePosition(card.projectId, stage, position);
   const t = now();
   const stageChanged = card.stage !== stage;
   db.prepare(
@@ -238,14 +285,18 @@ export function moveCard(id: number, stage: Stage, position: number | 'top' | 'b
   return publishCard(id);
 }
 
-/** Positions a card between two neighbours in its column (drag & drop). */
-export function positionBetween(stage: Stage, beforeId: number | null, afterId: number | null): number {
-  const before = beforeId != null ? getCard(beforeId) : undefined;
-  const after = afterId != null ? getCard(afterId) : undefined;
+/** Positions a card between two neighbours in its project's column (drag & drop). */
+export function positionBetween(projectId: number, stage: Stage, beforeId: number | null, afterId: number | null): number {
+  const neighbour = (id: number | null) => {
+    const card = id != null ? getCard(id) : undefined;
+    return card?.projectId === projectId ? card : undefined;
+  };
+  const before = neighbour(beforeId);
+  const after = neighbour(afterId);
   if (before && after) return (before.position + after.position) / 2;
   if (before) return before.position + 1;
   if (after) return after.position - 1;
-  return edgePosition(stage, 'bottom');
+  return edgePosition(projectId, stage, 'bottom');
 }
 
 export function getSecrets(id: number): Record<string, string> {
@@ -394,33 +445,87 @@ export function listLogs(cardId: number, limit = 2000): LogEntry[] {
 
 // ---------------------------------------------------------------- comments
 
-export function addComment(cardId: number, author: CommentAuthor, kind: CommentKind, body: string): Comment {
+export function addComment(cardId: number, author: CommentAuthor, kind: CommentKind, body: string, via: Comment['via'] = null): Comment {
   const ts = now();
   const res = db
-    .prepare('INSERT INTO comments (card_id, author, kind, body, ts) VALUES (?, ?, ?, ?, ?)')
-    .run(cardId, author, kind, body, ts);
-  const comment: Comment = { id: Number(res.lastInsertRowid), cardId, author, kind, body, ts };
+    .prepare('INSERT INTO comments (card_id, author, kind, body, via, ts) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(cardId, author, kind, body, via, ts);
+  const comment: Comment = { id: Number(res.lastInsertRowid), cardId, author, kind, body, via, ts };
   emit({ type: 'comment', comment });
   return comment;
 }
 
 export function listComments(cardId: number): Comment[] {
   return (db.prepare('SELECT * FROM comments WHERE card_id = ? ORDER BY id').all(cardId) as Row[]).map((r) => ({
-    id: r.id, cardId: r.card_id, author: r.author, kind: r.kind, body: r.body, ts: r.ts,
+    id: r.id, cardId: r.card_id, author: r.author, kind: r.kind, body: r.body, via: r.via ?? null, ts: r.ts,
   }));
 }
 
 // ---------------------------------------------------------------- settings
 
-export function loadSettings(defaults: Settings): Settings {
+/** Factory-wide key/values. Before projects existed these held the only project's settings. */
+export function loadSettings(): Record<string, unknown> {
   const rows = db.prepare('SELECT key, value FROM settings').all() as Row[];
-  const stored = Object.fromEntries(rows.map((r) => [r.key, JSON.parse(r.value)]));
-  return { ...defaults, ...stored };
+  return Object.fromEntries(rows.map((r) => [r.key, JSON.parse(r.value)]));
 }
 
-export function saveSettings(patch: Partial<Settings>): void {
+export function saveSettings(patch: Record<string, unknown>): void {
   const stmt = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
   for (const [k, v] of Object.entries(patch)) stmt.run(k, JSON.stringify(v));
+}
+
+// ---------------------------------------------------------------- projects
+
+export interface ProjectRow {
+  id: number;
+  name: string;
+  settings: Partial<Settings>;
+  createdAt: number;
+}
+
+/** Raw rows; `settings.ts` merges defaults and publishes changes. */
+export function listProjectRows(): ProjectRow[] {
+  return (db.prepare('SELECT * FROM projects ORDER BY id').all() as Row[]).map((r) => ({
+    id: r.id, name: r.name, settings: JSON.parse(r.settings), createdAt: r.created_at,
+  }));
+}
+
+export function insertProject(name: string, settings: Partial<Settings>): number {
+  const res = db.prepare('INSERT INTO projects (name, settings, created_at) VALUES (?, ?, ?)').run(name, JSON.stringify(settings), now());
+  return Number(res.lastInsertRowid);
+}
+
+export function updateProjectRow(id: number, name: string, settings: Settings): void {
+  db.prepare('UPDATE projects SET name = ?, settings = ? WHERE id = ?').run(name, JSON.stringify(settings), id);
+}
+
+/** Cards whose project is missing are adopted, e.g. after migrating a pre-projects database. */
+export function adoptOrphanCards(projectId: number): void {
+  db.prepare('UPDATE cards SET project_id = ? WHERE project_id NOT IN (SELECT id FROM projects)').run(projectId);
+}
+
+// ---------------------------------------------------------------- assistant
+
+function toAssistantMessage(r: Row): AssistantMessage {
+  return { id: r.id, author: r.author, kind: r.kind, body: r.body, cardIds: JSON.parse(r.card_ids), details: r.details, ts: r.ts };
+}
+
+export function addAssistantMessage(input: { author: AssistantMessage['author']; kind: AssistantMessageKind; body: string; cardIds?: number[]; details?: string }): AssistantMessage {
+  const ts = now();
+  const cardIds = input.cardIds ?? [];
+  const details = input.details ?? '';
+  const res = db
+    .prepare('INSERT INTO assistant_messages (author, kind, body, card_ids, details, ts) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(input.author, input.kind, input.body, JSON.stringify(cardIds), details, ts);
+  const message: AssistantMessage = { id: Number(res.lastInsertRowid), author: input.author, kind: input.kind, body: input.body, cardIds, details, ts };
+  emit({ type: 'assistant_message', message });
+  return message;
+}
+
+/** The latest messages, oldest first. */
+export function listAssistantMessages(limit = 200): AssistantMessage[] {
+  const rows = db.prepare('SELECT * FROM assistant_messages ORDER BY id DESC LIMIT ?').all(limit) as Row[];
+  return rows.reverse().map(toAssistantMessage);
 }
 
 /** Remove stored credential values before publishing new conversation or handoff text. */

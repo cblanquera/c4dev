@@ -6,7 +6,7 @@ test('card tabs stay visible while switching and scrolling a long Activity log',
   const state = await (await request.get('/api/state')).json();
   const now = Date.now();
   const card: Card = {
-    id: 900001, title: 'Activity navigation fixture', description: '# Activity navigation\n\nInspect long logs.',
+    id: 900001, projectId: 1, title: 'Activity navigation fixture', description: '# Activity navigation\n\nInspect long logs.',
     instructions: 'Check every tab.', instructionsHash: 'current', instructionsCurrent: true,
     stage: 'complete', position: 0, status: 'idle', statusText: 'Complete', tags: [], parentId: 1,
     branch: 'factory/card-900001', worktree: null, loops: 1, coverage: 100, acceptanceReady: true,
@@ -93,7 +93,7 @@ test('card tabs stay visible while switching and scrolling a long Activity log',
 });
 
 test('icon controls keep their accessible names and the board has no hints', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/#project-1');
   const settings = page.getByRole('button', { name: 'Settings', exact: true });
   await expect(settings).toBeVisible();
   await expect(settings.locator('svg')).toHaveAttribute('aria-hidden', 'true');

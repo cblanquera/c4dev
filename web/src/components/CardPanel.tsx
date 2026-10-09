@@ -9,7 +9,7 @@ import { Thread } from './Thread.tsx';
 import { AgentName } from './AgentName.tsx';
 import { contentFingerprint, useTabUnread } from '../useTabUnread.ts';
 import type { CardTab } from '../useTabUnread.ts';
-import { isBusy } from './CardTile.tsx';
+import { MERGE_LABEL, isBusy } from './CardTile.tsx';
 import { STAGE_LABELS, type Card, type CardDetail, type Stage, type Subtask } from '../../../server/types.ts';
 
 type Tab = CardTab;
@@ -30,22 +30,26 @@ const duration = (s: Subtask) => {
   return ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms / 60_000)}m`;
 };
 
-function roundLabel(round: number, subtasks: Subtask[]): string {
+/** Rounds say what they were, since subtasks carry no kind badges. */
+function roundLabel(round: number, subtasks: Subtask[], baseBranch: string): string {
   const kinds = new Set(subtasks.filter((s) => s.round === round).map((s) => s.kind));
   if (kinds.size === 1 && kinds.has('acceptance')) return 'Acceptance scripts';
+  if (kinds.size === 1 && kinds.has('merge')) return `Merge with ${baseBranch}`;
   const first = Math.min(...subtasks.map((s) => s.round));
   return round === first ? 'Plan' : `Rework ${round - first}`;
 }
 
 interface Props {
   detail: CardDetail;
+  /** The project's base branch, named on the merge control. */
+  baseBranch: string;
   cards: Card[];
   onCardClick: (id: number) => void;
   onFollowUp: (id: number) => void;
   onError: (message: string) => void;
 }
 
-export function CardPanel({ detail, cards, onCardClick, onFollowUp, onError }: Props) {
+export function CardPanel({ detail, baseBranch, cards, onCardClick, onFollowUp, onError }: Props) {
   const { card, subtasks, logs, comments } = detail;
   const [tab, setTab] = useState<Tab>(defaultTab(card.stage));
   const [openSubtask, setOpenSubtask] = useState<number | null>(null);
@@ -101,6 +105,7 @@ export function CardPanel({ detail, cards, onCardClick, onFollowUp, onError }: P
         <div className="tab-body">
           <dl className="meta">
             {card.branch && <><dt>Branch</dt><dd className="mono">{card.branch}</dd></>}
+            {card.stage === 'complete' && card.mergeState && <><dt>Merge</dt><dd>{card.mergeState === 'merged' ? card.mergeNote : `${MERGE_LABEL[card.mergeState]} · ${card.mergeNote}`}</dd></>}
             {card.worktree && <><dt>Worktree</dt><dd className="mono small">{card.worktree}</dd></>}
             {card.coverage != null && <><dt>Coverage</dt><dd>{card.coverage.toFixed(1)}%</dd></>}
             {card.loops > 0 && <><dt>Loops</dt><dd>{card.loops} round(s) back to In Progress</dd></>}
@@ -122,7 +127,7 @@ export function CardPanel({ detail, cards, onCardClick, onFollowUp, onError }: P
           {!subtasks.length && <p className="muted">{card.stage === 'backlog' ? 'The coordinator will split this into subtasks when it picks the card up.' : 'No subtasks.'}</p>}
           {rounds.map((round) => (
             <div key={round} className="round">
-              <h4 className="round-head">{roundLabel(round, subtasks)}<span className="muted small"> · {subtasks.filter((s) => s.round === round).length} subtask(s)</span></h4>
+              <h4 className="round-head">{roundLabel(round, subtasks, baseBranch)}<span className="muted small"> · {subtasks.filter((s) => s.round === round).length} subtask(s)</span></h4>
               {subtasks.filter((s) => s.round === round).sort((a, b) => b.seq - a.seq).map((s) => {
                 const open = openSubtask === s.id;
                 const subLogs = logs.filter((l) => l.subtaskId === s.id);
@@ -132,8 +137,8 @@ export function CardPanel({ detail, cards, onCardClick, onFollowUp, onError }: P
                     <button className="subtask-head" onClick={() => setOpenSubtask(open ? null : s.id)} aria-expanded={open}>
                       <span className={`st-icon st-${s.status}`} role="img" aria-label={s.status}>{s.status === 'running' ? <Icon name="loader-circle" className="spinner" /> : <Icon name={s.status === 'done' ? 'circle-check' : s.status === 'failed' ? 'circle-alert' : s.status === 'blocked' ? 'circle-help' : s.status === 'aborted' ? 'circle-x' : 'circle'} />}</span>
                       <span className="subtask-title">
-                        <span className="mono muted">{s.seq}</span> {s.title}
-                        {s.kind !== 'build' && <span className={`badge k-${s.kind}`}>{s.kind}</span>}
+                        <span className="mono muted">{s.seq}</span>
+                        <span className="subtask-name" title={s.title}>{s.title}</span>
                       </span>
                       <span className="subtask-meta muted small">
                         {s.worker && <AgentName actor={s.worker} subtask={s} as="span" />}
@@ -178,17 +183,26 @@ export function CardPanel({ detail, cards, onCardClick, onFollowUp, onError }: P
       )}
 
       <footer className="panel-actions">
-        {ABORTABLE.includes(card.stage) && (
+        {ABORTABLE.includes(card.stage) && (card.merging ? (
+          <button className="danger ghost" disabled={busy} onClick={() => {
+            if (confirm(`Cancel merging #${card.id}? Running agents stop. The card returns to Complete and its work stays on ${card.branch}.`)) run(() => api.abort(card.id));
+          }}><Icon name="square" /> Cancel merge</button>
+        ) : (
           <button className="danger ghost" disabled={busy} onClick={() => {
             if (confirm(`Abort #${card.id}? Running agents stop, worktrees are removed and branches archived. The card returns to the Icebox.`)) run(() => api.abort(card.id));
           }}><Icon name="square" /> Abort</button>
-        )}
+        ))}
         {card.stage === 'backlog' && !isBusy(card) && (
           <button className="secondary" disabled={busy} onClick={() => run(() => api.move(card.id, 'icebox', null, null))}><Icon name="arrow-left" /> Back to Icebox</button>
         )}
         <span className="spacer" />
         {card.stage === 'complete' && (
           <button className="ghost" disabled={busy} onClick={() => run(() => api.hide(card.id, !card.hidden))}>{card.hidden ? 'Unhide' : 'Hide'}</button>
+        )}
+        {card.stage === 'complete' && card.branch && card.mergeState !== 'merged' && !card.merging && !card.hidden && (
+          <button className="secondary" disabled={busy} onClick={() => {
+            if (confirm(`Merge #${card.id} into ${baseBranch}? If ${baseBranch} has moved, the branch is updated and verified again first.`)) run(() => api.merge(card.id));
+          }}>Merge into {baseBranch}</button>
         )}
         {(card.stage === 'complete' || card.stage === 'deliverables') && (
           <button className={card.stage === 'complete' ? 'primary' : 'ghost'} onClick={() => onFollowUp(card.id)}><Icon name="plus" /> Follow-up card</button>

@@ -31,8 +31,16 @@ export const ACTIVE_STAGES: readonly Stage[] = ['in_progress', 'verification', '
 /** Why a card is sitting in Deliverables. */
 export type DeliverableKind = 'approval' | 'input' | 'blocked';
 
+/**
+ * Whether a completed card's branch has reached the base branch: merged,
+ * unmerged (the branch was kept), or blocked (an automatic merge was refused).
+ */
+export type MergeState = 'merged' | 'unmerged' | 'blocked';
+
 export interface Card {
   id: number;
+  /** Card ids are unique across projects, so `#12` always means one card. */
+  projectId: number;
   title: string;
   description: string;
   instructions: string;
@@ -64,6 +72,12 @@ export interface Card {
   updatedAt: number;
   stageChangedAt: number;
   completedAt: number | null;
+  /** Set once the card is complete; re-checked against git so manual merges show up. */
+  mergeState: MergeState | null;
+  /** Why, e.g. "Kept on factory/card-4" or "main checkout has uncommitted changes". */
+  mergeNote: string;
+  /** A merge into the base branch was requested and isn't finished (it may be re-verifying). */
+  merging: boolean;
 }
 
 export type SubtaskKind = 'build' | 'fix' | 'acceptance' | 'merge';
@@ -120,6 +134,8 @@ export interface Comment {
   author: CommentAuthor;
   kind: CommentKind;
   body: string;
+  /** Set when the assistant passed the user's words on to this thread. */
+  via: 'assistant' | null;
   ts: number;
 }
 
@@ -155,6 +171,45 @@ export interface Settings {
   paused: boolean;
 }
 
+/** One repository with its own board, coordinator and settings. */
+export interface Project {
+  id: number;
+  name: string;
+  settings: Settings;
+  createdAt: number;
+}
+
+/** The assistant has its own driver, independent of any project. */
+export interface AssistantSettings {
+  driver: DriverName;
+  model: string;
+}
+
+/**
+ * message: conversation; notification: an unprompted update; relay: a
+ * coordinator's reply passed on; action: what code actually did; error: an
+ * action or reply that failed.
+ */
+export type AssistantMessageKind = 'message' | 'notification' | 'relay' | 'action' | 'error';
+
+export interface AssistantMessage {
+  id: number;
+  author: 'user' | 'assistant';
+  kind: AssistantMessageKind;
+  body: string;
+  /** Cards shown as clickable previews under the message. */
+  cardIds: number[];
+  /** Long-form markdown shown collapsed, e.g. generated agent instructions. */
+  details: string;
+  ts: number;
+}
+
+export interface AssistantState {
+  messages: AssistantMessage[];
+  busy: boolean;
+  settings: AssistantSettings;
+}
+
 export type FactoryEvent =
   | { type: 'card'; card: Card }
   | { type: 'card_removed'; id: number }
@@ -162,8 +217,20 @@ export type FactoryEvent =
   | { type: 'log'; log: LogEntry }
   | { type: 'comment'; comment: Comment }
   | { type: 'chat'; cardId: number; busy: boolean }
-  | { type: 'settings'; settings: Settings }
-  | { type: 'coordinator'; text: string; ts: number };
+  | { type: 'project'; project: Project }
+  | { type: 'coordinator'; projectId: number; text: string; ts: number }
+  | { type: 'assistant_message'; message: AssistantMessage }
+  | { type: 'assistant_busy'; busy: boolean }
+  | { type: 'assistant_settings'; settings: AssistantSettings };
+
+/** Everything a client needs on (re)connect. */
+export interface FactoryState {
+  projects: Project[];
+  cards: Card[];
+  /** Prefills the new-project form. */
+  projectDefaults: Settings;
+  assistant: AssistantState;
+}
 
 export interface CardDetail {
   card: Card;

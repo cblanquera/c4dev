@@ -1,7 +1,7 @@
 /**
- * The coordinator: a state machine that owns every card from Backlog to
- * Complete. It decides what runs when, and delegates judgement (planning,
- * building, auditing, approval) to the configured agent driver.
+ * The coordinator: a state machine that owns every card of one project from
+ * Backlog to Complete. It decides what runs when, and delegates judgement
+ * (planning, building, auditing, approval) to the project's agent driver.
  *
  *   Backlog ─plan─▶ In Progress ─all subtasks merged─▶ Verification
  *      ▲              ▲      ▲                          │ tests, coverage,
@@ -14,17 +14,20 @@ import * as db from './db.ts';
 import { emit } from './events.ts';
 import { judgeCoverage, parseCoverage } from './coverage.ts';
 import {
-  archiveCard, assertRepo, cardBranch, commitAll, createCardWorktree, createSubtaskWorktree, diffSinceFork,
-  mergeBranch, mergeIntoBase, removeWorktree,
+  archiveCard, assertRepo, cardBranch, commitAll, createCardWorktree, createSubtaskWorktree, diffSinceFork, isAncestor,
+  mergeBranch, publishToBase, removeWorktree,
 } from './git.ts';
 import { run, tail } from './shell.ts';
 import { settings } from './settings.ts';
 import { workerPrompt } from './prompts.ts';
 import { deliveryNotes } from './delivery.ts';
 import type { AgentContext, Driver } from './agents/driver.ts';
-import { ACTIVE_STAGES, STAGE_LABELS, type Card, type Stage, type Subtask } from './types.ts';
+import { ACTIVE_STAGES, STAGE_LABELS, type Card, type Comment, type Settings, type Stage, type Subtask } from './types.ts';
 
 const TICK_MS = 1500;
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+/** How often completed, unmerged branches are re-checked for merges made outside the factory. */
+const MERGE_CHECK_MS = 30_000;
 const MAX_SUBTASK_ATTEMPTS = 2;
 const MAX_DIFF_LOG = 200_000;
 
@@ -88,31 +91,56 @@ interface Job {
   promise: Promise<void>;
 }
 
+/** Who acted for the user, recorded on their thread messages. */
+type Via = Comment['via'];
+
+/** Why an Icebox card can't enter the Backlog yet, or null when it can. */
+export function backlogBlocker(card: Card): string | null {
+  if (!card.instructions.trim()) return 'Generate agent instructions before moving to the Backlog';
+  if (card.instructionsHash !== db.hashText(card.description)) {
+    return 'The description changed since the instructions were generated. Regenerate them (or mark them current) first.';
+  }
+  return null;
+}
+
 export class Coordinator {
+  readonly projectId: number;
   private jobs = new Map<number, Job>();
   private replyJobs = new Map<number, Job>();
-  private slots = new Slots(() => settings().maxWorkers);
+  private slots = new Slots(() => this.cfg().maxWorkers);
   private mergeLock = new KeyedLock();
   private timer: NodeJS.Timeout | undefined;
+  private mergeTimer: NodeJS.Timeout | undefined;
+  private checkingMerges = false;
+  /** Cards inside complete(); a merge must not start until its worktrees are cleaned up. */
+  private finishing = new Set<number>();
   private workerSeq = 0;
   private stopped = false;
   /** Cards being aborted; the scheduler must not pick them up again meanwhile. */
   private aborting = new Set<number>();
   private driver: () => Driver;
 
-  constructor(driver: () => Driver) {
+  constructor(projectId: number, driver: () => Driver) {
+    this.projectId = projectId;
     this.driver = driver;
+  }
+
+  private cfg(): Settings {
+    return settings(this.projectId);
   }
 
   start(): void {
     this.recover();
     this.timer = setInterval(() => this.tick(), TICK_MS);
+    this.mergeTimer = setInterval(() => void this.refreshMergeStates(), MERGE_CHECK_MS);
     this.tick();
+    void this.refreshMergeStates();
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
     clearInterval(this.timer);
+    clearInterval(this.mergeTimer);
     for (const job of this.jobs.values()) job.controller.abort();
     for (const job of this.replyJobs.values()) job.controller.abort();
     await Promise.allSettled([...this.jobs.values(), ...this.replyJobs.values()].map((j) => j.promise));
@@ -133,7 +161,7 @@ export class Coordinator {
 
   /** Work interrupted by a restart is retried from the last stable point. */
   private recover(): void {
-    for (const card of db.listCards()) {
+    for (const card of db.listCards(this.projectId)) {
       for (const s of db.listSubtasks(card.id)) {
         if (s.status === 'running') db.updateSubtask(s.id, { status: 'pending', worker: null });
       }
@@ -144,7 +172,7 @@ export class Coordinator {
   }
 
   private announce(text: string): void {
-    emit({ type: 'coordinator', text, ts: Date.now() });
+    emit({ type: 'coordinator', projectId: this.projectId, text, ts: Date.now() });
   }
 
   private log(card: Card | number, text: string, level: 'oneliner' | 'summary' | 'detail' = 'oneliner', subtaskId: number | null = null): void {
@@ -154,20 +182,23 @@ export class Coordinator {
   // ------------------------------------------------------------ scheduling
 
   tick(): void {
-    const cfg = settings();
+    const cfg = this.cfg();
     if (cfg.paused || this.stopped) return;
 
-    for (const card of db.listCards()) {
+    const cards = db.listCards(this.projectId);
+    for (const card of cards) {
       if (ACTIVE_STAGES.includes(card.stage) && !this.jobs.has(card.id)) {
         this.spawn(card.id, (signal) => this.advance(card.id, signal));
+      } else if (card.stage === 'complete' && card.merging && !this.jobs.has(card.id) && !this.finishing.has(card.id)) {
+        this.spawn(card.id, (signal) => this.mergeCard(card.id, signal));
       }
     }
 
     // Pull from the top of the backlog while there is capacity.
-    const active = db.listCards().filter((c) => ACTIVE_STAGES.includes(c.stage) || this.jobs.has(c.id)).length;
+    const active = cards.filter((c) => ACTIVE_STAGES.includes(c.stage) || this.jobs.has(c.id)).length;
     let capacity = cfg.maxActiveCards - active;
     if (capacity <= 0) return;
-    for (const card of db.cardsInStage('backlog')) {
+    for (const card of db.cardsInStage(this.projectId, 'backlog')) {
       if (capacity <= 0) break;
       if (this.jobs.has(card.id)) continue;
       const waitingOn = this.inFlightReferences(card);
@@ -202,7 +233,7 @@ export class Coordinator {
       })
       .finally(() => {
         this.jobs.delete(cardId);
-        if (!settings().paused) setTimeout(() => this.tick(), 50);
+        if (!this.cfg().paused) setTimeout(() => this.tick(), 50);
       });
     this.jobs.set(cardId, { controller, promise });
   }
@@ -220,7 +251,7 @@ export class Coordinator {
   private escalate(card: Card, kind: 'approval' | 'input' | 'blocked', statusText: string, comment: string): void {
     const resumeStage: Stage = card.stage === 'deliverables' ? (card.resumeStage ?? 'in_progress') : card.stage;
     db.updateCard(card.id, { deliverableKind: kind, resumeStage, status: kind === 'approval' ? 'review' : 'needs_input', statusText });
-    db.moveCard(card.id, 'deliverables', 'top');
+    db.moveCard(card.id, 'deliverables', 'top', statusText);
     db.addComment(card.id, 'coordinator', kind === 'approval' ? 'question' : 'question', comment);
     this.announce(`#${card.id} → Deliverables: ${statusText}`);
   }
@@ -244,7 +275,7 @@ export class Coordinator {
   // ------------------------------------------------------------ backlog → in progress
 
   private async startCard(cardId: number, signal: AbortSignal): Promise<void> {
-    const cfg = settings();
+    const cfg = this.cfg();
     let card = db.getCard(cardId)!;
     await assertRepo(cfg.repoPath);
     db.setStatus(card.id, 'planning', 'Coordinator is planning subtasks');
@@ -262,12 +293,12 @@ export class Coordinator {
       const subtasks = db.addSubtasks(card.id, db.currentRound(card.id) + 1, plan.map((p) => ({ ...p, kind: p.kind ?? 'build' })));
       this.log(card, `Split into ${subtasks.length} subtask(s):\n${subtasks.map((s) => `${s.seq}. ${s.title}${s.dependsOn.length ? ` (after ${s.dependsOn.map((d) => `#${subtasks.find((x) => x.id === d)?.seq}`).join(', ')})` : ''}`).join('\n')}`, 'summary');
     }
-    db.moveCard(card.id, 'in_progress', 'top');
+    db.moveCard(card.id, 'in_progress', 'top', `planned ${plural(db.listSubtasks(card.id).filter((s) => s.status === 'pending').length, 'subtask')}`);
     db.setStatus(card.id, 'queued', 'Waiting for workers');
   }
 
   private async setup(card: Card, cwd: string, signal: AbortSignal): Promise<void> {
-    const cmd = settings().setupCommand.trim();
+    const cmd = this.cfg().setupCommand.trim();
     if (!cmd) return;
     this.log(card, `$ ${cmd}`);
     const res = await run(cmd, { cwd, signal, env: this.secretsEnv(card.id) });
@@ -344,8 +375,7 @@ export class Coordinator {
         `These subtasks wait on work that never finished: ${stuck.map((s) => s.title).join(', ')}.`);
     }
 
-    this.log(card, 'All subtasks merged. Moving to Verification.', 'summary');
-    db.moveCard(card.id, 'verification', 'top');
+    db.moveCard(card.id, 'verification', 'top', 'all subtasks merged into the card branch');
     db.setStatus(card.id, 'queued', 'Waiting for verification');
   }
 
@@ -354,7 +384,7 @@ export class Coordinator {
     const worker = `worker-${++this.workerSeq}`;
     let subtask = db.getSubtask(subtaskId)!;
     try {
-      const cfg = settings();
+      const cfg = this.cfg();
       const card = db.getCard(cardId)!;
       subtask = db.updateSubtask(subtask.id, { status: 'running', worker, attempts: subtask.attempts + 1, startedAt: Date.now(), endedAt: null })!;
       this.log(card, `Assigned "${subtask.title}" to ${worker}`, 'oneliner', subtask.id);
@@ -407,7 +437,7 @@ export class Coordinator {
 
   /** Merges a finished subtask into the card branch; conflicts become a merge subtask. */
   private async integrate(card: Card, subtask: Subtask, signal: AbortSignal): Promise<void> {
-    const cfg = settings();
+    const cfg = this.cfg();
     const fresh = db.getSubtask(subtask.id)!;
     await this.mergeLock.run(card.id, async () => {
       if (signal.aborted) throw new AbortError();
@@ -432,7 +462,7 @@ export class Coordinator {
   // ------------------------------------------------------------ verification
 
   private async runVerification(card: Card, signal: AbortSignal): Promise<void> {
-    const cfg = settings();
+    const cfg = this.cfg();
     const cwd = card.worktree!;
     const env = this.secretsEnv(card.id);
 
@@ -513,14 +543,13 @@ export class Coordinator {
       })));
     }
 
-    this.log(card, 'Verification passed. Moving to Acceptance.', 'summary');
-    db.moveCard(card.id, 'acceptance', 'top');
+    db.moveCard(card.id, 'acceptance', 'top', 'tests, coverage and senior audit passed');
     db.setStatus(card.id, 'queued', 'Waiting for acceptance');
   }
 
   /** Sends a card back to In Progress with fix subtasks, or escalates after too many loops. */
   private backToWork(card: Card, reason: string, fixes: db.NewSubtask[]): void {
-    const cfg = settings();
+    const cfg = this.cfg();
     const loops = card.loops + 1;
     db.updateCard(card.id, { loops });
     if (loops > cfg.maxLoops) {
@@ -530,16 +559,15 @@ export class Coordinator {
       return;
     }
     db.addSubtasks(card.id, db.currentRound(card.id) + 1, fixes);
-    this.log(card, `${reason}. Back to In Progress (loop ${loops}/${cfg.maxLoops}) with ${fixes.length} fix subtask(s).`, 'summary');
     this.announce(`#${card.id} back to In Progress: ${reason}`);
-    db.moveCard(card.id, 'in_progress', 'top');
+    db.moveCard(card.id, 'in_progress', 'top', `${reason}; loop ${loops}/${cfg.maxLoops} with ${plural(fixes.length, 'fix subtask')}`);
     db.setStatus(card.id, 'queued', reason);
   }
 
   // ------------------------------------------------------------ acceptance
 
   private async runAcceptance(card: Card, signal: AbortSignal): Promise<void> {
-    const cfg = settings();
+    const cfg = this.cfg();
 
     if (!card.acceptanceReady) {
       db.setStatus(card.id, 'running', 'Writing acceptance scripts');
@@ -580,6 +608,9 @@ export class Coordinator {
       this.log(card, 'No acceptance command configured; scripts written but not run');
     }
 
+    // A merge pass was already reviewed and approved as work; it only had to pass again with the new base.
+    if (db.getCard(card.id)!.merging) return this.complete(card.id, `the update from ${cfg.baseBranch} passed verification and acceptance`);
+
     db.setStatus(card.id, 'deciding', 'Preparing your review instructions');
     const verification = db.listLogs(card.id).filter((l) => /^(Tests passed|Acceptance tests passed|Coverage \d|No acceptance command)/.test(l.text)).map((l) => l.text).join('\n');
     const notes = await this.driver().handoff(
@@ -601,44 +632,199 @@ export class Coordinator {
       return this.escalate(db.getCard(card.id)!, decision.kind, decision.kind === 'input' ? 'Needs your input' : 'Ready for your approval',
         `${decision.reason}${questions ? `\n\n${questions}` : ''}\n\nApprove to complete, or tell me what to change.`);
     }
-    await this.complete(card.id);
+    await this.complete(card.id, 'acceptance passed and no human review is needed');
   }
 
-  private async complete(cardId: number): Promise<void> {
-    const cfg = settings();
+  private async complete(cardId: number, reason: string): Promise<void> {
+    const cfg = this.cfg();
     const card = db.getCard(cardId)!;
-    db.updateCard(card.id, { deliverableKind: null, resumeStage: null });
-    db.moveCard(card.id, 'complete', 'top');
-    db.setStatus(card.id, 'done', `Done on ${card.branch ?? cardBranch(card.id)}`);
-    if (cfg.onComplete === 'merge') this.log(card, await mergeIntoBase(cfg.repoPath, cfg.baseBranch, card.id), 'summary');
-    for (const s of db.listSubtasks(card.id)) if (s.worktree) await removeWorktree(cfg.repoPath, s.worktree);
-    await removeWorktree(cfg.repoPath, card.worktree);
-    db.updateCard(card.id, { worktree: null });
-    this.announce(`#${card.id} complete`);
+    const branch = card.branch ?? cardBranch(card.id);
+    this.finishing.add(card.id);
+    try {
+      // Settled before the move, so whoever hears about the completion also hears where the work went.
+      const merge = card.merging ? {} : await this.mergeOnComplete(card, branch);
+      const merging = card.merging || merge.merging === true;
+      db.updateCard(card.id, { deliverableKind: null, resumeStage: null, ...merge });
+      db.moveCard(card.id, 'complete', 'top', reason);
+      db.setStatus(card.id, merging ? 'merging' : 'done', merging ? `Merging into ${cfg.baseBranch}…` : `Done on ${branch}`);
+      for (const s of db.listSubtasks(card.id)) if (s.worktree) await removeWorktree(cfg.repoPath, s.worktree);
+      await removeWorktree(cfg.repoPath, card.worktree);
+      db.updateCard(card.id, { worktree: null });
+      this.announce(`#${card.id} complete`);
+    } finally {
+      this.finishing.delete(card.id);
+    }
+    if (db.getCard(card.id)?.merging) this.tick();
+  }
+
+  /** "Merge into base branch" projects land work straight away, or start a merge when the base has moved. */
+  private async mergeOnComplete(card: Card, branch: string): Promise<db.CardPatch> {
+    const cfg = this.cfg();
+    if (cfg.onComplete !== 'merge') return { mergeState: 'unmerged', mergeNote: `Kept on ${branch}` };
+    return (await this.publish(card, branch))
+      ?? { mergeState: 'unmerged', mergeNote: `Updating with ${cfg.baseBranch} before merging`, merging: true };
+  }
+
+  /**
+   * Lands a verified branch on the base branch. Returns null when the base has
+   * moved since, so the branch must be updated and verified again first.
+   */
+  private async publish(card: Card, branch: string): Promise<db.CardPatch | null> {
+    const cfg = this.cfg();
+    const base = cfg.baseBranch;
+    let reason: string;
+    let steps: string[] = [];
+    try {
+      const result = await publishToBase(cfg.repoPath, base, branch, `Merge card #${card.id}: ${card.title}`);
+      steps = result.steps;
+      if (result.ok) {
+        this.log(card, `Merged ${branch} into ${base}. It was verified against this exact ${base}, so nothing new reached ${base} untested.`, 'summary');
+        this.log(card, steps.join('\n'), 'detail');
+        return { mergeState: 'merged', mergeNote: `Merged into ${base}`, merging: false };
+      }
+      if (result.moved) {
+        this.log(card, `${base} has moved since ${branch} was verified, so the branch is brought up to date and verified again before merging.`, 'summary');
+        this.log(card, steps.join('\n'), 'detail');
+        return null;
+      }
+      reason = result.reason;
+    } catch (err) {
+      reason = (err instanceof Error ? err.message : String(err)).split('\n')[0];
+    }
+    this.log(card, `Kept ${branch}: ${reason}.`, 'summary');
+    if (steps.length) this.log(card, steps.join('\n'), 'detail');
+    return { mergeState: 'blocked', mergeNote: `Kept on ${branch}: ${reason}`, merging: false };
+  }
+
+  /**
+   * Merge button and assistant: land a completed card on the base branch. If
+   * the base has moved, the card goes back through verification first, so only
+   * verified code reaches it.
+   */
+  requestMerge(cardId: number, via: Via = null): Card {
+    const cfg = this.cfg();
+    const card = this.mustBeIn(cardId, ['complete']);
+    if (card.hidden) throw new HttpError(409, `Card #${card.id} is hidden`);
+    if (!card.branch) throw new HttpError(409, `Card #${card.id} has no branch to merge`);
+    if (card.mergeState === 'merged') throw new HttpError(409, `Card #${card.id} is already merged into ${cfg.baseBranch}`);
+    if (card.merging || this.jobs.has(card.id)) throw new HttpError(409, `Card #${card.id} is already being merged`);
+    // A merge gets its own loop budget.
+    db.updateCard(card.id, { merging: true, loops: 0 });
+    db.setStatus(card.id, 'merging', cfg.paused ? 'Waiting to merge: coordinator paused' : `Merging into ${cfg.baseBranch}…`);
+    this.log(card, `You asked to merge ${card.branch} into ${cfg.baseBranch}${via === 'assistant' ? ', through the assistant' : ''}.`, 'summary');
+    this.tick();
+    return db.getCard(card.id)!;
+  }
+
+  /** Lands a requested merge, or brings the branch up to date and sends it back through verification. */
+  private async mergeCard(cardId: number, signal: AbortSignal): Promise<void> {
+    const cfg = this.cfg();
+    let card = db.getCard(cardId)!;
+    if (card.stage !== 'complete' || !card.merging || !card.branch) return;
+    const branch = card.branch;
+    const base = cfg.baseBranch;
+    try {
+      db.setStatus(card.id, 'merging', `Merging into ${base}…`);
+      const landed = await this.publish(card, branch);
+      if (signal.aborted) throw new AbortError();
+      if (landed) {
+        db.updateCard(card.id, landed);
+        db.setStatus(card.id, 'done', landed.mergeState === 'merged' ? `Done · merged into ${base}` : `Done on ${branch}`);
+        if (landed.mergeState === 'merged') this.announce(`#${card.id} merged into ${base}`);
+        return;
+      }
+
+      // The base moved since this branch was verified: update the branch, then verify the combination.
+      const loops = card.loops + 1;
+      if (loops > cfg.maxLoops) {
+        db.updateCard(card.id, { merging: false, mergeState: 'blocked', mergeNote: `Kept on ${branch}: ${base} kept moving during ${cfg.maxLoops} merge attempts` });
+        db.setStatus(card.id, 'done', `Done on ${branch}`);
+        return;
+      }
+      await assertRepo(cfg.repoPath);
+      const { worktree } = await createCardWorktree(cfg.repoPath, base, card.id);
+      card = db.updateCard(card.id, { worktree, loops })!;
+      this.log(card, `Created worktree ${worktree} on ${branch}`);
+      await this.setup(card, worktree, signal);
+      this.log(card, `$ git merge --no-ff ${base}`);
+      const result = await mergeBranch(worktree, base, `Merge ${base} into card #${card.id}`);
+      if (signal.aborted) throw new AbortError();
+      if (result.ok) {
+        db.moveCard(card.id, 'verification', 'top', `merged ${base} into ${branch} without conflicts (merge attempt ${loops}/${cfg.maxLoops}); verifying the combination`);
+        db.setStatus(card.id, 'queued', `Verifying the merge with ${base}`);
+        return;
+      }
+      const conflicts = [...result.output.matchAll(/CONFLICT \([^)]*\): .*? in (\S+)/g)].map((m) => m[1]);
+      db.moveCard(card.id, 'in_progress', 'top', `${base} conflicts with ${branch}${conflicts.length ? ` in ${conflicts.map((f) => `\`${f}\``).join(', ')}` : ''} (merge attempt ${loops}/${cfg.maxLoops}); a worker resolves them`);
+      this.log(card, `$ git merge --no-ff ${base}\n${tail(result.output, 60)}\n$ git merge --abort`, 'detail');
+      db.addSubtasks(card.id, db.currentRound(card.id) + 1, [{
+        kind: 'merge',
+        title: `Resolve conflicts with ${base}`,
+        instructions: `Run \`git merge ${base}\` in this worktree and resolve every conflict, keeping this task's changes and everything ${base} gained since. Leave the resolved files in place; the coordinator will conclude the merge.\n\nConflict report:\n\`\`\`\n${tail(result.output, 40)}\n\`\`\``,
+        doneWhen: 'No conflict markers remain and the tests pass.',
+      }]);
+      db.setStatus(card.id, 'queued', `Resolving conflicts with ${base}`);
+    } catch (err) {
+      if (signal.aborted || err instanceof AbortError) throw err;
+      // Problems before the card re-enters the pipeline stop the merge; the completed work is untouched.
+      const reason = (err instanceof Error ? err.message : String(err)).split('\n')[0];
+      const current = db.getCard(card.id)!;
+      if (current.worktree) await removeWorktree(cfg.repoPath, current.worktree).catch(() => {});
+      db.updateCard(card.id, { merging: false, worktree: null, mergeState: 'blocked', mergeNote: `Kept on ${branch}: ${reason}` });
+      db.setStatus(card.id, 'done', `Done on ${branch}`);
+      this.log(card, `Merge stopped: ${reason}`, 'detail');
+    }
+  }
+
+  /**
+   * Completed branches merged by hand outside the factory are marked merged;
+   * completed cards from before merge states existed get one.
+   */
+  async refreshMergeStates(): Promise<void> {
+    if (this.checkingMerges || this.stopped) return;
+    this.checkingMerges = true;
+    try {
+      const cfg = this.cfg();
+      for (const card of db.listCards(this.projectId)) {
+        if (card.stage !== 'complete' || !card.branch || card.merging || card.mergeState === 'merged') continue;
+        const merged = await isAncestor(cfg.repoPath, card.branch, cfg.baseBranch).catch(() => null);
+        const fresh = db.getCard(card.id);
+        if (this.stopped || !fresh || fresh.stage !== 'complete' || fresh.merging) continue;
+        if (merged) {
+          db.updateCard(card.id, { mergeState: 'merged', mergeNote: `Merged into ${cfg.baseBranch}` });
+          this.log(card, `Found ${card.branch} merged into ${cfg.baseBranch} outside the factory.`, 'summary');
+        }
+        else if (!fresh.mergeState) {
+          db.updateCard(card.id, { mergeState: 'unmerged', mergeNote: merged === false ? `Kept on ${card.branch}` : `Branch ${card.branch} no longer exists` });
+        }
+      }
+    } finally {
+      this.checkingMerges = false;
+    }
   }
 
   // ------------------------------------------------------------ deliverables (human in the loop)
 
-  async approve(cardId: number, note: string): Promise<void> {
+  async approve(cardId: number, note: string, via: Via = null): Promise<void> {
     const card = this.mustBeIn(cardId, ['deliverables']);
     this.cancelReply(card.id);
-    db.addComment(card.id, 'user', 'approval', note || 'Approved.');
-    await this.complete(card.id);
+    db.addComment(card.id, 'user', 'approval', note || 'Approved.', via);
+    await this.complete(card.id, via === 'assistant' ? 'approved by you, through the assistant' : 'approved by you');
   }
 
   /** Explicit "send back": no pushback, the user's word goes. */
-  requestChanges(cardId: number, body: string): void {
+  requestChanges(cardId: number, body: string, via: Via = null): void {
     const card = this.mustBeIn(cardId, ['deliverables']);
     this.cancelReply(card.id);
-    db.addComment(card.id, 'user', 'changes', body);
+    db.addComment(card.id, 'user', 'changes', body, via);
     this.resume(card, body);
   }
 
   /** Resume button: retry / continue with whatever input is in the thread. */
-  resumeFromDeliverables(cardId: number, body = '', secrets: Record<string, string> = {}): void {
+  resumeFromDeliverables(cardId: number, body = '', secrets: Record<string, string> = {}, via: Via = null): void {
     const card = this.mustBeIn(cardId, ['deliverables']);
     this.cancelReply(card.id);
-    this.storeInput(card.id, body, secrets);
+    this.storeInput(card.id, body, secrets, via);
     const input = db.listComments(card.id).filter((c) => c.author === 'user' && c.ts > card.stageChangedAt).map((c) => c.body).join('\n\n');
     this.resume(card, input);
   }
@@ -648,12 +834,27 @@ export class Coordinator {
     this.replyJobs.get(cardId)?.controller.abort();
   }
 
+  /**
+   * An explicit request to start an Icebox card: queues it at the bottom of
+   * the Backlog under the same rules as a manual move.
+   */
+  enqueue(cardId: number): Card {
+    const card = this.mustBeIn(cardId, ['icebox']);
+    if (card.hidden) throw new HttpError(409, `Card #${card.id} is deleted`);
+    const blocker = backlogBlocker(card);
+    if (blocker) throw new HttpError(409, blocker);
+    db.moveCard(card.id, 'backlog', 'bottom', 'queued by the assistant at your request');
+    db.setStatus(card.id, 'queued', 'Queued for the coordinator');
+    this.tick();
+    return db.getCard(card.id)!;
+  }
+
   /** Chat never queues new work or changes an active card's scheduler status. */
-  comment(cardId: number, body: string, secrets: Record<string, string>): void {
+  comment(cardId: number, body: string, secrets: Record<string, string>, via: Via = null): void {
     const card = this.mustBeIn(cardId, ['backlog', 'in_progress', 'verification', 'acceptance', 'deliverables', 'complete']);
     if (card.hidden || this.aborting.has(cardId) || this.stopped) throw new HttpError(409, 'This card is not available for conversation');
     if (Object.keys(secrets).length && card.stage !== 'deliverables') throw new HttpError(409, 'Secrets can only be provided in Deliverables');
-    this.storeInput(card.id, body, secrets);
+    this.storeInput(card.id, body, secrets, via);
     this.cancelReply(card.id);
     const controller = new AbortController();
     const promise = Promise.resolve().then(async () => {
@@ -662,8 +863,8 @@ export class Coordinator {
       const subtasks = db.listSubtasks(card.id);
       const comments = db.listComments(card.id);
       const reply = await this.driver().reply(
-        { card: fresh, thread: comments, subtasks, repoPath: settings().repoPath,
-          deliveryNotes: deliveryNotes(fresh, subtasks, db.listLogs(card.id), comments, settings()) },
+        { card: fresh, thread: comments, subtasks, repoPath: this.cfg().repoPath,
+          deliveryNotes: deliveryNotes(fresh, subtasks, db.listLogs(card.id), comments, this.cfg()) },
         this.ctx(card.id, null, 'coordinator', controller.signal),
       );
       controller.signal.throwIfAborted();
@@ -673,7 +874,7 @@ export class Coordinator {
       if (reply.action === 'create_card') {
         const description = typeof reply.taskDescription === 'string' ? db.redactSecrets(card.id, reply.taskDescription).trim() : '';
         if (!description) throw new Error('The proposed task needs a description');
-        const draft = db.createCard({ description: `${description}\n\nFollow-up to #${card.id}`, parentId: card.id, instructions: '', instructionsHash: null });
+        const draft = db.createCard({ projectId: card.projectId, description: `${description}\n\nFollow-up to #${card.id}`, parentId: card.id, instructions: '', instructionsHash: null });
         text += `\n\nCreated #${draft.id} in the **Icebox**. Review the task and generate instructions before using **Move to Backlog**.`;
       }
       db.addComment(card.id, 'coordinator', 'reply', text);
@@ -696,12 +897,12 @@ export class Coordinator {
   }
 
   /** Saves the human's message and secrets (values never go into the thread). */
-  private storeInput(cardId: number, body: string, secrets: Record<string, string>): void {
+  private storeInput(cardId: number, body: string, secrets: Record<string, string>, via: Via = null): void {
     const provided = Object.fromEntries(Object.entries(secrets).filter(([k, v]) => /^[A-Z_][A-Z0-9_]*$/i.test(k) && typeof v === 'string' && v));
     const names = Object.keys(provided);
     if (names.length) db.setSecrets(cardId, provided);
     const text = `${body.trim()}${names.length ? `\n\n_Provided secret(s): ${names.map((n) => `\`${n}\``).join(', ')}_` : ''}`.trim();
-    if (text) db.addComment(cardId, 'user', 'input', db.redactSecrets(cardId, text));
+    if (text) db.addComment(cardId, 'user', 'input', db.redactSecrets(cardId, text), via);
   }
 
   private resume(card: Card, input: string): void {
@@ -730,9 +931,8 @@ export class Coordinator {
       }]);
     }
     db.updateCard(card.id, { deliverableKind: null, resumeStage: null });
-    db.moveCard(card.id, target, 'top');
+    db.moveCard(card.id, target, 'top', `resumed${input.trim() ? ' with your input' : ''}`);
     db.setStatus(card.id, 'queued', `Resumed with your input → ${STAGE_LABELS[target]}`);
-    this.log(card, `Resumed into ${STAGE_LABELS[target]}${input.trim() ? ' with human input' : ''}`, 'summary');
     this.tick();
   }
 
@@ -749,7 +949,7 @@ export class Coordinator {
   }
 
   private async abortCard(card: Card): Promise<Card> {
-    const cfg = settings();
+    const cfg = this.cfg();
     const job = this.jobs.get(card.id);
     job?.controller.abort();
     const replyJob = this.replyJobs.get(card.id);
@@ -761,6 +961,18 @@ export class Coordinator {
     for (const s of subs) {
       if (['pending', 'running', 'blocked'].includes(s.status)) db.updateSubtask(s.id, { status: 'aborted', endedAt: Date.now() });
     }
+    // Aborting a merge cancels only the merge: the completed work stays complete, on its branch.
+    if (card.merging) {
+      for (const dir of [...subs.map((s) => s.worktree), card.worktree]) {
+        await removeWorktree(cfg.repoPath, dir).catch((err) => this.log(card, `Cleanup warning: ${err instanceof Error ? err.message : err}`, 'detail'));
+      }
+      db.updateCard(card.id, {
+        worktree: null, merging: false, deliverableKind: null, resumeStage: null,
+        mergeState: 'unmerged', mergeNote: `Merge cancelled; kept on ${card.branch}`, status: 'done', statusText: 'Merge cancelled',
+      });
+      this.announce(`#${card.id} merge cancelled`);
+      return db.moveCard(card.id, 'complete', 'top', `merge cancelled; the work stays on ${card.branch}`)!;
+    }
     let archived: string[] = [];
     try {
       archived = await archiveCard(cfg.repoPath, card.id, [...subs.map((s) => s.worktree), card.worktree]);
@@ -771,14 +983,13 @@ export class Coordinator {
       branch: null, worktree: null, loops: 0, coverage: null, acceptanceReady: false, deliverableKind: null, resumeStage: null,
       status: 'idle', statusText: `Aborted from ${STAGE_LABELS[card.stage]}`,
     });
-    this.log(card, `Aborted from ${STAGE_LABELS[card.stage]}.${archived.length ? ` Branches archived: ${archived.join(', ')}` : ''}`, 'summary');
     this.announce(`#${card.id} aborted`);
-    return db.moveCard(card.id, 'icebox', 'top')!;
+    return db.moveCard(card.id, 'icebox', 'top', `aborted${archived.length ? `; branches archived: ${archived.join(', ')}` : ''}`)!;
   }
 
   private mustBeIn(cardId: number, stages: Stage[]): Card {
     const card = db.getCard(cardId);
-    if (!card) throw new HttpError(404, `Card #${cardId} not found`);
+    if (!card || card.projectId !== this.projectId) throw new HttpError(404, `Card #${cardId} not found`);
     if (!stages.includes(card.stage)) throw new HttpError(409, `Card #${cardId} is in ${STAGE_LABELS[card.stage]}`);
     return card;
   }

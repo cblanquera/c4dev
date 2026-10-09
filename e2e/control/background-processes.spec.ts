@@ -14,7 +14,7 @@ test('background process popover refreshes and stops only the selected project s
     processes = processes.filter((process) => process.id !== id);
     await route.fulfill({ json: { ok: true, disconnects: false } });
   });
-  await page.goto('/');
+  await page.goto('/#project-1');
   const trigger = page.getByRole('button', { name: 'Background processes', exact: true });
   const settings = page.getByRole('button', { name: 'Settings', exact: true });
   const triggerBox = await trigger.boundingBox();

@@ -3,7 +3,7 @@ import { createCard, column, expectNoHorizontalOverflow, tile } from '../helpers
 
 test.describe('Journey: authoring a card', () => {
   test('instructions are generated, go stale when the task changes, and the card saves to the Icebox', async ({ page }) => {
-    await page.goto('/#new');
+    await page.goto('/#project-1/new');
     const task = page.getByPlaceholder(/Describe the outcome/);
     await task.fill('# Greeting helper\n\n- greet(name) returns "Hello, name"\n- tests for greet');
     await page.getByRole('button', { name: /Generate instructions/ }).click();
@@ -26,7 +26,7 @@ test.describe('Journey: authoring a card', () => {
   });
 
   test('a vague task gets open questions back', async ({ page }) => {
-    await page.goto('/#new');
+    await page.goto('/#project-1/new');
     await page.getByPlaceholder(/Describe the outcome/).fill('Make it faster');
     await page.getByRole('button', { name: /Generate instructions/ }).click();
     await expect(page.locator('.instructions-doc')).toContainText('The description is brief');
@@ -35,7 +35,7 @@ test.describe('Journey: authoring a card', () => {
   test('typing # suggests other cards and inserts a reference', async ({ page }) => {
     const topic = `Payment research ${test.info().project.name}`;
     const target = await createCard(page, `# ${topic}\n\n- compare providers\n- write summary`);
-    await page.goto('/#new');
+    await page.goto('/#project-1/new');
     const task = page.getByPlaceholder(/Describe the outcome/);
     await task.fill('Builds on #');
     await task.press('End');
@@ -53,7 +53,7 @@ test.describe('Journey: authoring a card', () => {
 
 test.describe('Journey: capturing an idea quickly', () => {
   test('a card can be created with just a title and fleshed out later', async ({ page }) => {
-    await page.goto('/#new');
+    await page.goto('/#project-1/new');
     await page.getByPlaceholder(/Describe the outcome/).fill('# Rate limiting for the public API');
     await expect(page.getByRole('button', { name: /Move to Backlog/ })).toHaveCount(0);
     await page.getByRole('button', { name: 'Create in Icebox' }).click();

@@ -68,6 +68,7 @@ export function Thread({ card, cards, comments, deliveryNotes, replying, onCardC
           <div key={c.id} className={`bubble from-${c.author} k-${c.kind}`}>
             <div className="bubble-meta">
               {c.author === 'user' ? <strong>You</strong> : <AgentName actor="coordinator" />} {KIND_LABEL[c.kind]}
+              {c.via === 'assistant' && <span className="muted"> via <AgentName actor="assistant" as="span" /></span>}
               <span className="muted"> · {new Date(c.ts).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</span>
             </div>
             <Markdown source={c.body} onCardClick={onCardClick} />

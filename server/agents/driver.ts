@@ -3,7 +3,7 @@
  * The coordinator owns the state machine; a driver only answers questions
  * ("plan this", "build this", "audit this") and reports activity via `log`.
  */
-import type { Card, Comment, LogLevel, Subtask, SubtaskKind } from '../types.ts';
+import type { AssistantMessage, Card, Comment, DeliverableKind, LogLevel, MergeState, Stage, Subtask, SubtaskKind } from '../types.ts';
 
 export interface AgentContext {
   signal: AbortSignal;
@@ -55,6 +55,38 @@ export interface CoordinatorReply {
   rework: string;
 }
 
+/** Something the assistant asks code to do. Code validates every action before acting. */
+export interface AssistantAction {
+  type: 'create_card' | 'update_card' | 'move_to_backlog' | 'message_coordinator' | 'approve' | 'request_changes' | 'resume' | 'merge';
+  /** Target project for create_card; 0 otherwise. */
+  projectId: number;
+  /** Target card for every other action; 0 for create_card. */
+  cardId: number;
+  /** Task description, message, note or requested changes. */
+  body: string;
+}
+
+export interface AssistantReply {
+  reply: string;
+  /** Cards to show as clickable previews under the reply. */
+  cardIds: number[];
+  actions: AssistantAction[];
+}
+
+/** What the assistant sees of one project. */
+export interface ProjectDigest {
+  id: number;
+  name: string;
+  /** The repository folder name, which users often call the project by. */
+  repoName: string;
+  paused: boolean;
+  cards: {
+    id: number; title: string; stage: Stage; statusText: string; waitingFor: DeliverableKind | null; completedAt: number | null;
+    /** Completed cards only: whether the branch reached the base branch. */
+    merge?: MergeState | null;
+  }[];
+}
+
 /** Progress while generating instructions: tool activity, then the document. */
 export interface InstructionEvent {
   type: 'status' | 'text';
@@ -84,4 +116,10 @@ export interface Driver {
   handoff(input: { card: Card; subtasks: Subtask[]; cwd: string; verification: string }, ctx: AgentContext): Promise<string>;
 
   reply(input: { card: Card; thread: Comment[]; subtasks: Subtask[]; repoPath: string; deliveryNotes: string }, ctx: AgentContext): Promise<CoordinatorReply>;
+
+  /** The cross-project assistant. Read-only: it proposes actions; code performs them. */
+  assist(
+    input: { conversation: AssistantMessage[]; projects: ProjectDigest[]; cardDetails: (cardId: number) => string | null },
+    ctx: AgentContext,
+  ): Promise<AssistantReply>;
 }

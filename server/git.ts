@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { DATA_DIR } from './settings.ts';
-import { git, run } from './shell.ts';
+import { git, run, shellQuote } from './shell.ts';
 import type { Card, FileChange, Subtask } from './types.ts';
 
 export const cardBranch = (cardId: number) => `factory/card-${cardId}`;
@@ -54,12 +54,17 @@ export async function createSubtaskWorktree(repoPath: string, card: Card, subtas
   return { branch, worktree: dir };
 }
 
-/** Stages and commits everything; returns false when there was nothing to commit. */
+/**
+ * Stages and commits everything; returns false when there was nothing to commit.
+ * A merge in progress is always concluded, even when its resolution leaves the
+ * files unchanged (every conflict resolved in this branch's favour).
+ */
 export async function commitAll(cwd: string, message: string): Promise<boolean> {
   await git(cwd, 'add', '-A');
   const status = await git(cwd, 'status', '--porcelain');
-  if (!status) return false;
-  await git(cwd, '-c', 'user.name=Software Factory', '-c', 'user.email=factory@localhost', 'commit', '-m', message, '--no-verify');
+  const merging = (await run('git rev-parse -q --verify MERGE_HEAD', { cwd })).code === 0;
+  if (!status && !merging) return false;
+  await git(cwd, '-c', 'user.name=Software Factory', '-c', 'user.email=factory@localhost', 'commit', '--allow-empty', '-m', message, '--no-verify');
   return true;
 }
 
@@ -113,16 +118,59 @@ export async function archiveCard(repoPath: string, cardId: number, worktrees: (
   return archived;
 }
 
+/** True when `ancestor` is contained in `descendant` (both branch names), false when not, null when either is missing. */
+export async function isAncestor(repoPath: string, ancestor: string, descendant: string): Promise<boolean | null> {
+  const res = await run(`git merge-base --is-ancestor ${shellQuote(`refs/heads/${ancestor}`)} ${shellQuote(`refs/heads/${descendant}`)}`, { cwd: repoPath });
+  return res.code === 0 ? true : res.code === 1 ? false : null;
+}
+
+export interface PublishResult {
+  ok: boolean;
+  /** The card branch doesn't contain the base branch (any more): update and verify it first. */
+  moved: boolean;
+  reason: string;
+  /** Every git command run, with what it found, for the card's audit trail. */
+  steps: string[];
+}
+
+const short = (sha: string) => sha.slice(0, 7);
+
 /**
- * Merges the card branch into the base branch, only when the main checkout
- * is on the base branch and clean. Never touches a dirty working tree.
+ * Lands a verified card branch on the base branch with a merge commit whose
+ * code is exactly the card branch. Only possible when the card branch already
+ * contains the base branch; `moved` reports that it doesn't (any more).
+ * The main checkout is used only when it has the base branch checked out, and
+ * then only when clean; otherwise the branch ref moves without touching it.
  */
-export async function mergeIntoBase(repoPath: string, baseBranch: string, cardId: number): Promise<string> {
+export async function publishToBase(repoPath: string, baseBranch: string, branch: string, message: string): Promise<PublishResult> {
+  const steps: string[] = [];
+  const fail = (reason: string, moved = false): PublishResult => ({ ok: false, moved, reason, steps });
+  const contained = await isAncestor(repoPath, baseBranch, branch);
+  const baseTip = await git(repoPath, 'rev-parse', `refs/heads/${baseBranch}`);
+  const branchTip = await git(repoPath, 'rev-parse', `refs/heads/${branch}`);
+  steps.push(`$ git merge-base --is-ancestor ${baseBranch} ${branch}  # ${baseBranch} at ${short(baseTip)} ${contained ? 'is' : 'is not'} in ${branch} at ${short(branchTip)}`);
+  if (!contained) return fail(`${baseBranch} has moved`, true);
+
   const head = await git(repoPath, 'rev-parse', '--abbrev-ref', 'HEAD');
-  if (head !== baseBranch) return `Kept ${cardBranch(cardId)}: main checkout is on "${head}", not "${baseBranch}".`;
-  if (await git(repoPath, 'status', '--porcelain')) return `Kept ${cardBranch(cardId)}: main checkout has uncommitted changes.`;
-  const res = await mergeBranch(repoPath, cardBranch(cardId), `Merge card #${cardId}`);
-  return res.ok ? `Merged ${cardBranch(cardId)} into ${baseBranch}.` : `Merge into ${baseBranch} conflicted; branch kept.\n${res.output}`;
+  if (head === baseBranch) {
+    steps.push(`$ git status --porcelain  # in the main checkout, which has ${baseBranch} checked out`);
+    if (await git(repoPath, 'status', '--porcelain')) return fail('main checkout has uncommitted changes');
+    steps.push(`$ git merge --no-ff -m "${message}" ${branch}`);
+    const res = await mergeBranch(repoPath, branch, message);
+    if (!res.ok) return fail(`merging into ${baseBranch} failed`);
+  } else {
+    const tree = await git(repoPath, 'rev-parse', `refs/heads/${branch}^{tree}`);
+    const commit = await git(repoPath, '-c', 'user.name=Software Factory', '-c', 'user.email=factory@localhost',
+      'commit-tree', tree, '-p', baseTip, '-p', `refs/heads/${branch}`, '-m', message);
+    steps.push(`$ git commit-tree ${short(tree)} -p ${short(baseTip)} -p ${branch} -m "${message}"  # merge commit ${short(commit)}, the main checkout (on ${head}) is untouched`);
+    // Compare-and-swap: fails if the base branch moved since it was read.
+    const res = await run(`git update-ref ${shellQuote(`refs/heads/${baseBranch}`)} ${shellQuote(commit)} ${shellQuote(baseTip)}`, { cwd: repoPath });
+    steps.push(`$ git update-ref refs/heads/${baseBranch} ${short(commit)} ${short(baseTip)}${res.code === 0 ? '' : '  # refused: the branch moved meanwhile'}`);
+    if (res.code !== 0) return fail(`${baseBranch} has moved`, true);
+  }
+  const newTip = await git(repoPath, 'rev-parse', `refs/heads/${baseBranch}`);
+  steps.push(`# ${baseBranch}: ${short(baseTip)} → ${short(newTip)}`);
+  return { ok: true, moved: false, reason: '', steps };
 }
 
 /** Creates a tiny Node project so the factory works out of the box. */

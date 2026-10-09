@@ -18,13 +18,13 @@ devmetrics list
 devmetrics start --summary "C4Dev app review" -- 'PORT={port} npm start'
 ```
 
-Use the URL returned by devmetrics. It assigns a localhost port in 3000–3020 and stops the server after two hours. Use `devmetrics stop <port>` when finished. Rebuild the UI after changes and refresh the page to review them. Development and preview servers must also run through devmetrics.
+Use the URL returned by devmetrics. It opens on the **home screen**: your projects beside the assistant. Click a project to open its board. It assigns a localhost port in 3000–3020 and stops the server after two hours. Use `devmetrics stop <port>` when finished. Rebuild the UI after changes and refresh the page to review them. Development and preview servers must also run through devmetrics.
 
 On first launch the factory uses the **Simulated** driver against a demo repo it creates in `.factory/demo-repo`. Simulated agents make real commits, worktrees, merges and diffs, but they write harmless notes instead of code and make no API calls. Use it to learn the flow without spending tokens.
 
-To put real agents on your own project, open **⚙ Settings** and:
+To put real agents on your own project, press **New project** on the home screen (or open **⚙ Settings** on a board) and:
 
-1. Set **Repository path** to your git repo and **Base branch**.
+1. Set a **Name**, the **Repository path** of your git repo, and its **Base branch**. Each project needs its own repository.
 2. Set the **Test**, **Coverage** and **Acceptance** commands for that project (see [Quality gates](#quality-gates)).
 3. Optionally set a **Worktree setup command** (e.g. `npm ci`). Each worktree is a fresh checkout.
 4. Switch **Driver** to **Claude Agent SDK**. It uses your Claude Code login or `ANTHROPIC_API_KEY`.
@@ -46,6 +46,20 @@ To put real agents on your own project, open **⚙ Settings** and:
 **Abort** (from any stage past the Icebox) stops running agents and kills their processes. It removes the worktrees, renames the branches to `factory/archive/…`, and returns the card to the Icebox, where it is editable again.
 
 The coordinator sends a card back at most **Max loops** times (5 by default). After that it escalates to you in Deliverables instead of looping forever.
+
+## Projects and the assistant
+
+Each project has its own board, coordinator and settings: driver, models, quality gates, limits and pause. Cards are numbered across all projects, so `#12` links work anywhere.
+
+The home screen's assistant (shown as *Ada Lovelace · Chief of Staff*) is the one agent you talk to about every project. It keeps answers short and high level unless you ask for detail, and gives suggestions only when you ask. When you ask, it can:
+
+- **Draft a card** in any project's Icebox, generate its agent instructions, and show you the objective, assumptions and open questions to confirm.
+- **Edit an Icebox card** and regenerate its instructions.
+- **Move a card to the Backlog** once you say so.
+- **Message a card's coordinator** and relay the reply back to you.
+- **Approve, request changes on, or resume** a card waiting in Deliverables.
+
+It also tells you when a card completes, when a project has nothing left in flight, and when a card needs your approval, input or help. Cards it mentions appear as previews. Click one to open it over the chat, then **Open board** to jump to its board. Never paste credentials into the chat; open the card and use its **Secret** field. The assistant's driver and model are set with **⚙** on the home screen. The Claude assistant reads boards through one read-only tool and has no repository access.
 
 ## Logs
 
@@ -93,8 +107,10 @@ Leave a command empty to skip that gate.
 
 ```
 server/
-  index.ts          entry: DB, settings, drivers, coordinator, HTTP
+  index.ts          entry: DB, settings, drivers, coordinators, assistant, HTTP
+  factory.ts        one coordinator per project
   coordinator.ts    the state machine: scheduling, worker slots, loops, escalation, abort
+  assistant.ts      cross-project assistant: actions, notifications, relays
   agents/driver.ts  the interface the coordinator talks to
   agents/claude.ts  Claude Agent SDK driver: query() per role, structured output, in-process MCP tools
   agents/simulated.ts  token-free driver for demos and tests
@@ -103,7 +119,7 @@ server/
   coverage.ts       coverage parsing and thresholds
   db.ts             SQLite (node:sqlite) persistence; every change is broadcast
   app.ts            REST API + server-sent events; manual-move rules live here
-web/src/            React UI: board, card editor, card panel, logs, thread, settings
+web/src/            React UI: home (projects + assistant), board, card editor, card panel, logs, thread, settings
 test/               node:test unit + end-to-end tests (simulated driver, real git)
 e2e/                Playwright acceptance tests by journey/use case, desktop + mobile
 ```

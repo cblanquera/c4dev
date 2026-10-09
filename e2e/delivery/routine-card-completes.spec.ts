@@ -4,7 +4,7 @@ import { column, createCard, expectNoHorizontalOverflow, isMobile, tile } from '
 test.describe('Journey: delivering a routine card', () => {
   test('a card dragged to the Backlog is built, verified, accepted and completed', async ({ page }) => {
     const id = await createCard(page, '# Clamp helper\n\n- clamp(n, min, max)\n- tests for clamp');
-    await page.goto('/');
+    await page.goto('/#project-1');
 
     if (isMobile(page)) {
       // Touch devices have no HTML5 drag; the panel offers the same move.
@@ -22,6 +22,17 @@ test.describe('Journey: delivering a routine card', () => {
     await expect(column(page, 'In Progress').locator(`[data-card-id="${id}"]`).or(column(page, 'Verification').locator(`[data-card-id="${id}"]`))).toBeVisible();
     await page.screenshot({ path: test.info().outputPath('in-flight.png') });
     await expect(column(page, 'Complete').locator(`[data-card-id="${id}"]`)).toBeVisible({ timeout: 60_000 });
+    // The demo project keeps branches, so the tile and Overview say the work isn't merged yet.
+    await expect(tile(page, id).getByRole('img', { name: 'Not merged' })).toBeVisible();
+    await page.getByRole('tab', { name: 'Overview', exact: true }).click();
+    await expect(page.getByText(`Not merged · Kept on factory/card-${id}`)).toBeVisible();
+
+    // Merging lands the verified branch on main; nothing has moved main, so it stays in Complete.
+    page.once('dialog', (dialog) => dialog.accept());
+    await page.getByRole('button', { name: 'Merge into main' }).click();
+    await expect(tile(page, id).getByRole('img', { name: 'Merged' })).toBeVisible();
+    await expect(page.getByText('Merged into main', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Merge into main' })).toHaveCount(0);
 
     // Subtasks show the plan, the audit rework round and the acceptance scripts.
     await page.getByRole('tab', { name: /Subtasks/ }).click();
@@ -41,7 +52,7 @@ test.describe('Journey: delivering a routine card', () => {
 
   test('cards outside the Icebox and Backlog cannot be dragged', async ({ page }) => {
     test.skip(isMobile(page), 'drag & drop is a pointer interaction');
-    await page.goto('/');
+    await page.goto('/#project-1');
     const done = column(page, 'Complete').locator('article').first();
     await expect(done).toBeVisible({ timeout: 60_000 });
     await expect(done).toHaveAttribute('draggable', 'false');

@@ -3,15 +3,16 @@
  * session with its own cwd (the relevant worktree) and tool permissions.
  */
 import path from 'node:path';
-import type { Card, Comment, Subtask } from '../types.ts';
+import type { AssistantMessage, Card, Comment, Subtask } from '../types.ts';
 import { createSdkMcpServer, query, tool, type Options, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import {
-  APPROVAL_SCHEMA, AUDIT_SCHEMA, AUDIT_SYSTEM, INSTRUCTIONS_SYSTEM, PLAN_SCHEMA, PLAN_SYSTEM, REPLY_SCHEMA,
-  REPLY_SYSTEM, HANDOFF_SYSTEM, HANDOFF_SCHEMA, WORKER_SYSTEM, approvalPrompt, auditPrompt, instructionsPrompt, planPrompt, replyPrompt, handoffPrompt,
+  APPROVAL_SCHEMA, ASSISTANT_SCHEMA, ASSISTANT_SYSTEM, AUDIT_SCHEMA, AUDIT_SYSTEM, INSTRUCTIONS_SYSTEM, PLAN_SCHEMA, PLAN_SYSTEM, REPLY_SCHEMA,
+  REPLY_SYSTEM, HANDOFF_SYSTEM, HANDOFF_SCHEMA, WORKER_SYSTEM, approvalPrompt, assistantPrompt, auditPrompt, instructionsPrompt, planPrompt, replyPrompt, handoffPrompt,
 } from '../prompts.ts';
+import { DATA_DIR } from '../settings.ts';
 import type {
-  AgentContext, ApprovalDecision, InstructionEvent, AuditResult, CoordinatorReply, Driver, PlannedSubtask, WorkResult,
+  AgentContext, ApprovalDecision, AssistantReply, InstructionEvent, AuditResult, CoordinatorReply, Driver, PlannedSubtask, ProjectDigest, WorkResult,
 } from './driver.ts';
 
 const READ_ONLY_TOOLS = ['Read', 'Glob', 'Grep'];
@@ -25,6 +26,8 @@ interface RunSpec {
   readOnly: boolean;
   /** Extra auto-approved tools for read-only agents, e.g. "Bash(git diff:*)". */
   extraTools?: string[];
+  /** No built-in tools or filesystem settings at all; only `extraTools` (e.g. in-process MCP tools). */
+  noFiles?: boolean;
   schema?: Record<string, unknown>;
   env?: Record<string, string>;
   mcpServers?: Options['mcpServers'];
@@ -58,12 +61,14 @@ async function runAgent(spec: RunSpec): Promise<{ text: string; structured: unkn
     model: spec.model,
     abortController,
     systemPrompt: { type: 'preset', preset: 'claude_code', append: spec.system },
-    settingSources: ['project'],
+    settingSources: spec.noFiles ? [] : ['project'],
     env: { ...process.env, ...spec.env } as Record<string, string>,
     mcpServers: spec.mcpServers,
-    ...(spec.readOnly
-      ? { permissionMode: 'dontAsk', allowedTools: [...READ_ONLY_TOOLS, ...(spec.extraTools ?? [])] }
-      : { permissionMode: 'bypassPermissions', allowDangerouslySkipPermissions: true }),
+    ...(spec.noFiles
+      ? { tools: [], permissionMode: 'dontAsk', allowedTools: spec.extraTools ?? [] }
+      : spec.readOnly
+        ? { permissionMode: 'dontAsk', allowedTools: [...READ_ONLY_TOOLS, ...(spec.extraTools ?? [])] }
+        : { permissionMode: 'bypassPermissions', allowDangerouslySkipPermissions: true }),
     ...(spec.schema ? { outputFormat: { type: 'json_schema', schema: spec.schema } } : {}),
   };
 
@@ -263,6 +268,42 @@ export class ClaudeDriver implements Driver {
     const reply = structured as CoordinatorReply | undefined;
     if (!reply || !['none', 'resume', 'create_card'].includes(reply.action) || !reply.reply?.trim()) {
       throw new Error('Coordinator returned an invalid reply');
+    }
+    return reply;
+  }
+
+  /** The assistant reads boards through one read-only tool; it has no file, shell or write access. */
+  async assist(
+    input: { conversation: AssistantMessage[]; projects: ProjectDigest[]; cardDetails: (cardId: number) => string | null },
+    ctx: AgentContext,
+  ): Promise<AssistantReply> {
+    const boards = createSdkMcpServer({
+      name: 'factory',
+      version: '1.0.0',
+      tools: [
+        tool(
+          'card_details',
+          'Read one card in full: description, agent instructions, subtasks, recent thread and review notes.',
+          { card_id: z.number().int().describe('The card number, e.g. 12 for #12') },
+          async (args) => ({ content: [{ type: 'text', text: input.cardDetails(args.card_id) ?? `Card #${args.card_id} not found.` }] }),
+        ),
+      ],
+    });
+    const { structured } = await runAgent({
+      prompt: assistantPrompt(input.conversation, input.projects),
+      system: ASSISTANT_SYSTEM,
+      cwd: DATA_DIR,
+      model: this.model(),
+      signal: ctx.signal,
+      readOnly: true,
+      noFiles: true,
+      extraTools: ['mcp__factory__card_details'],
+      mcpServers: { factory: boards },
+      schema: ASSISTANT_SCHEMA,
+    });
+    const reply = structured as AssistantReply | undefined;
+    if (!reply?.reply?.trim() || !Array.isArray(reply.actions) || !Array.isArray(reply.cardIds)) {
+      throw new Error('Assistant returned an invalid reply');
     }
     return reply;
   }

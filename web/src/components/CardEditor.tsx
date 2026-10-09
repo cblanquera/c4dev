@@ -12,6 +12,7 @@ import type { Card } from '../../../server/types.ts';
 
 interface Props {
   card: Card | null;
+  projectId: number;
   parentId: number | null;
   cards: Card[];
   onSaved: (card: Card) => void;
@@ -20,7 +21,7 @@ interface Props {
   onError: (message: string) => void;
 }
 
-export function CardEditor({ card, parentId, cards, onSaved, onDeleted, onCardClick, onError }: Props) {
+export function CardEditor({ card, projectId, parentId, cards, onSaved, onDeleted, onCardClick, onError }: Props) {
   const [description, setDescription] = useState(card?.description ?? (parentId ? `Follow-up to #${parentId}\n\n` : ''));
   const [instructions, setInstructions] = useState(card?.instructions ?? '');
   const [hash, setHash] = useState<string | null>(card?.instructionsHash ?? null);
@@ -55,7 +56,7 @@ export function CardEditor({ card, parentId, cards, onSaved, onDeleted, onCardCl
     setEditingInstructions(false);
     let streamed = '';
     try {
-      const result = await api.generateInstructions(source, card?.id ?? null, {
+      const result = await api.generateInstructions(source, projectId, card?.id ?? null, {
         status: (text) => setActivity((a) => [...a.slice(-5), text]),
         text: (chunk) => {
           streamed += chunk;
@@ -81,7 +82,7 @@ export function CardEditor({ card, parentId, cards, onSaved, onDeleted, onCardCl
     setSaving(true);
     try {
       const body = { description, instructions, instructionsHash: hash };
-      onSaved(card ? await api.update(card.id, body) : await api.create({ ...body, parentId }));
+      onSaved(card ? await api.update(card.id, body) : await api.create({ ...body, projectId, parentId }));
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Save failed');
     } finally {

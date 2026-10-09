@@ -8,7 +8,7 @@ test('named team bubbles preserve details, and the Markdown composer stays below
   const state = await (await request.get('/api/state')).json();
   const now = Date.now();
   const card: Card = {
-    id: 900010, title: 'Team conversation fixture', description: 'Review the team conversation.',
+    id: 900010, projectId: 1, title: 'Team conversation fixture', description: 'Review the team conversation.',
     instructions: 'Inspect the activity.', instructionsHash: 'current', instructionsCurrent: true,
     stage: 'complete', position: 0, status: 'idle', statusText: 'Complete', tags: [], parentId: null,
     branch: 'factory/card-900010', worktree: null, loops: 0, coverage: 100, acceptanceReady: true,
@@ -32,7 +32,7 @@ test('named team bubbles preserve details, and the Markdown composer stays below
       log(7, 'worker-6', 'detail', 'Standalone error\nNo summary was recorded.', 6),
       log(8, 'worker-2', 'summary', 'The selector layout is sketched.', 2),
     ],
-    comments: Array.from({ length: 40 }, (_, i) => ({ id: i + 1, cardId: card.id, author: i % 2 ? 'user' as const : 'coordinator' as const, kind: 'note' as const, body: `Conversation message ${i}\n\nA longer message to make the history scroll.`, ts: now + i })),
+    comments: Array.from({ length: 40 }, (_, i) => ({ id: i + 1, cardId: card.id, author: i % 2 ? 'user' as const : 'coordinator' as const, kind: 'note' as const, body: `Conversation message ${i}\n\nA longer message to make the history scroll.`, via: null, ts: now + i })),
   };
   await page.route('**/api/state', (route) => route.fulfill({ json: { ...state, cards: [card, { ...card, id: 900011, title: 'Referenced task' }] } }));
   await page.route(`**/api/cards/${card.id}`, (route) => route.fulfill({ json: detail }));

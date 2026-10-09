@@ -61,9 +61,12 @@ export function run(command: string, opts: RunOptions): Promise<RunResult> {
   });
 }
 
+/** Quotes one argument for the shell, so user-supplied names can't inject commands. */
+export const shellQuote = (arg: string) => `'${arg.replace(/'/g, `'\\''`)}'`;
+
 /** Runs a git command; throws with output on failure. */
 export async function git(cwd: string, ...args: string[]): Promise<string> {
-  const quoted = args.map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(' ');
+  const quoted = args.map(shellQuote).join(' ');
   const res = await run(`git ${quoted}`, { cwd });
   if (res.code !== 0) throw new Error(`git ${args.join(' ')} failed:\n${res.output.trim()}`);
   return res.output.trim();

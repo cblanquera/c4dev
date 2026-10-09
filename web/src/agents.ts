@@ -2,13 +2,14 @@
 import type { Subtask } from '../../server/types.ts';
 
 const WORKER_NAMES = ['Alex', 'Jamie', 'Sam', 'Riley', 'Casey', 'Jordan', 'Taylor', 'Morgan'];
-export type AgentJob = 'Coordinator' | 'Designer' | 'Developer' | 'Auditor' | 'Senior Developer';
+export type AgentJob = 'Coordinator' | 'Designer' | 'Developer' | 'Auditor' | 'Senior Developer' | 'Chief of Staff';
 export const AGENT_JOBS: { title: AgentJob; context: string }[] = [
   { title: 'Coordinator', context: 'The current card, its plan, dependencies, and repository. Assigns tasks, checks progress, and prepares the review handoff.' },
   { title: 'Designer', context: 'An assigned design task and its isolated worktree. Reports layout, interaction, and visual design decisions.' },
   { title: 'Developer', context: 'An assigned implementation or fix and its isolated worktree. Reports code changes, trade-offs, and blockers.' },
   { title: 'Auditor', context: 'An assigned test or acceptance task and its isolated worktree. Reports test scenarios, scripts, and findings; recorded results show what actually ran.' },
   { title: 'Senior Developer', context: 'The combined card worktree and the current review lens. Reviews code and recommendations with read-only access.' },
+  { title: 'Chief of Staff', context: 'Every project board, without repository access. Reports status, drafts Icebox cards, and passes your messages and decisions to coordinators when you ask.' },
 ];
 
 export function agentProfile(actor: string, subtask?: Subtask) {
@@ -20,6 +21,9 @@ export function agentProfile(actor: string, subtask?: Subtask) {
   } else if (actor === 'senior') {
     title = 'Senior Developer';
     name = 'Linus Torvalds';
+  } else if (actor === 'assistant') {
+    title = 'Chief of Staff';
+    name = 'Ada Lovelace';
   } else {
     const worker = actor.match(/^worker-(\d+)$/);
     if (worker) {

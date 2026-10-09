@@ -1,26 +1,31 @@
-/** Live board state, kept in sync with the server over SSE. */
+/** Live factory state for every project and the assistant, kept in sync with the server over SSE. */
 import { useEffect, useMemo, useReducer, useRef } from 'react';
 import { api } from './api.ts';
-import type { Card, CardDetail, FactoryEvent, Settings } from '../../server/types.ts';
+import type { AssistantState, Card, CardDetail, FactoryEvent, FactoryState, Project, Settings } from '../../server/types.ts';
 
 export interface FeedItem {
+  projectId: number;
   text: string;
   ts: number;
 }
 
 interface State {
   cards: Map<number, Card>;
-  settings: Settings | null;
+  projects: Map<number, Project>;
+  projectDefaults: Settings | null;
+  assistant: AssistantState | null;
   feed: FeedItem[];
   detail: CardDetail | null;
   connected: boolean;
 }
 
 type Action =
-  | { type: 'loaded'; cards: Card[]; settings: Settings }
+  | { type: 'loaded'; state: FactoryState }
   | { type: 'event'; event: FactoryEvent }
   | { type: 'detail'; detail: CardDetail | null }
   | { type: 'connected'; value: boolean };
+
+const MAX_MESSAGES = 300;
 
 function upsert<T extends { id: number }>(list: T[], item: T): T[] {
   const i = list.findIndex((x) => x.id === item.id);
@@ -33,7 +38,13 @@ function upsert<T extends { id: number }>(list: T[], item: T): T[] {
 function reducer(state: State, action: Action): State {
   switch (action.type) {
     case 'loaded':
-      return { ...state, cards: new Map(action.cards.map((c) => [c.id, c])), settings: action.settings };
+      return {
+        ...state,
+        cards: new Map(action.state.cards.map((c) => [c.id, c])),
+        projects: new Map(action.state.projects.map((p) => [p.id, p])),
+        projectDefaults: action.state.projectDefaults,
+        assistant: action.state.assistant,
+      };
     case 'connected':
       return { ...state, connected: action.value };
     case 'detail':
@@ -41,6 +52,7 @@ function reducer(state: State, action: Action): State {
     case 'event': {
       const e = action.event;
       const d = state.detail;
+      const a = state.assistant;
       switch (e.type) {
         case 'card': {
           const cards = new Map(state.cards);
@@ -52,10 +64,19 @@ function reducer(state: State, action: Action): State {
           cards.delete(e.id);
           return { ...state, cards };
         }
-        case 'settings':
-          return { ...state, settings: e.settings };
+        case 'project': {
+          const projects = new Map(state.projects);
+          projects.set(e.project.id, e.project);
+          return { ...state, projects };
+        }
         case 'coordinator':
-          return { ...state, feed: [{ text: e.text, ts: e.ts }, ...state.feed].slice(0, 50) };
+          return { ...state, feed: [{ projectId: e.projectId, text: e.text, ts: e.ts }, ...state.feed].slice(0, 50) };
+        case 'assistant_message':
+          return a ? { ...state, assistant: { ...a, messages: upsert(a.messages, e.message).slice(-MAX_MESSAGES) } } : state;
+        case 'assistant_busy':
+          return a ? { ...state, assistant: { ...a, busy: e.busy } } : state;
+        case 'assistant_settings':
+          return a ? { ...state, assistant: { ...a, settings: e.settings } } : state;
         case 'subtask':
           return d && d.card.id === e.subtask.cardId ? { ...state, detail: { ...d, subtasks: upsert(d.subtasks, e.subtask).sort((a, b) => a.seq - b.seq) } } : state;
         case 'log':
@@ -71,7 +92,9 @@ function reducer(state: State, action: Action): State {
 }
 
 export function useFactory(openCardId: number | null) {
-  const [state, dispatch] = useReducer(reducer, { cards: new Map(), settings: null, feed: [], detail: null, connected: false });
+  const [state, dispatch] = useReducer(reducer, {
+    cards: new Map(), projects: new Map(), projectDefaults: null, assistant: null, feed: [], detail: null, connected: false,
+  });
   const openRef = useRef(openCardId);
   openRef.current = openCardId;
 
@@ -84,7 +107,7 @@ export function useFactory(openCardId: number | null) {
         dispatch({ type: 'connected', value: true });
         // Resync on (re)connect so nothing missed while offline lingers.
         const s = await api.state();
-        if (!cancelled) dispatch({ type: 'loaded', cards: s.cards, settings: s.settings });
+        if (!cancelled) dispatch({ type: 'loaded', state: s });
         if (openRef.current != null) api.card(openRef.current).then((detail) => dispatch({ type: 'detail', detail })).catch(() => {});
       };
       source.onmessage = (m) => dispatch({ type: 'event', event: JSON.parse(m.data) });
@@ -107,6 +130,7 @@ export function useFactory(openCardId: number | null) {
     };
   }, [openCardId]);
 
-  const cards = useMemo(() => [...state.cards.values()], [state.cards]);
-  return { ...state, cardList: cards };
+  const cardList = useMemo(() => [...state.cards.values()], [state.cards]);
+  const projectList = useMemo(() => [...state.projects.values()].sort((a, b) => a.id - b.id), [state.projects]);
+  return { ...state, cardList, projectList };
 }

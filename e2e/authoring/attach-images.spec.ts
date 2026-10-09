@@ -5,7 +5,7 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
 
 test.describe('Journey: authoring a card', () => {
   test('attaching an image uploads it and embeds it in the markdown', async ({ page }) => {
-    await page.goto('/#new');
+    await page.goto('/#project-1/new');
     const task = page.getByPlaceholder(/Describe the outcome/);
     await task.fill('# Fix the header\n\nSee screenshot:\n');
     await page.locator('input[type=file]').setInputFiles({ name: 'header-bug.png', mimeType: 'image/png', buffer: PNG });

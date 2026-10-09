@@ -2,13 +2,28 @@ import { Icon } from './Icon.tsx';
 import type { DragEvent } from 'react';
 import type { Card } from '../../../server/types.ts';
 
-const BUSY = new Set(['planning', 'running', 'testing', 'auditing', 'deciding', 'replying']);
+const BUSY = new Set(['planning', 'running', 'testing', 'auditing', 'deciding', 'replying', 'merging']);
 
 export function isBusy(card: Card): boolean {
   return BUSY.has(card.status);
 }
 
 const DELIVERABLE_LABEL = { approval: 'Approval', input: 'Needs input', blocked: 'Needs help' } as const;
+
+export const MERGE_LABEL = { merged: 'Merged', unmerged: 'Not merged', blocked: 'Merge blocked' } as const;
+
+/** Where a completed card's work went; the note explains why on hover. */
+export function MergeBadge({ card }: { card: Card }) {
+  // Shown in every stage, so a finished card back on the board explains itself.
+  if (card.merging) return <span className="badge subtle" title="A merge into the base branch is in progress">Merging…</span>;
+  if (card.stage !== 'complete' || !card.mergeState) return null;
+  // A link when merged, a broken link otherwise; the name and the reason stay available to everyone.
+  return (
+    <span className={`badge icon-only m-${card.mergeState}`} role="img" aria-label={MERGE_LABEL[card.mergeState]} title={`${MERGE_LABEL[card.mergeState]}: ${card.mergeNote}`}>
+      <Icon name={card.mergeState === 'merged' ? 'link' : 'unlink'} size={12} />
+    </span>
+  );
+}
 
 interface Props {
   card: Card;
@@ -41,6 +56,7 @@ export function CardTile({ card, selected, draggable, dragging, onOpen, onDragSt
       <div className="card-top">
         <span className="mono muted">#{card.id}</span>
         {card.deliverableKind && <span className={`badge d-${card.deliverableKind}`}>{DELIVERABLE_LABEL[card.deliverableKind]}</span>}
+        <MergeBadge card={card} />
         <span className="spacer" />
         {card.loops > 0 && <span className="badge subtle" title="Times sent back to In Progress"><Icon name="rotate-ccw" size={12} /> {card.loops}</span>}
         {card.coverage != null && <span className="badge subtle" title="Line coverage">{Math.round(card.coverage)}%</span>}

@@ -1,5 +1,25 @@
 /** Thin typed client for the factory API. */
-import type { AssistantSettings, Card, CardDetail, FactoryState, Project, ProjectProcess, Settings, Stage } from '../../server/types.ts';
+import type {
+  AgentProfile, Card, CardDetail, FactoryState, Project, ProjectProcess, ProviderId, ProviderStatus, Settings, Skill, Stage, UsageTotals,
+} from '../../server/types.ts';
+
+export interface FolderListing {
+  path: string;
+  parent: string | null;
+  home: string;
+  git: boolean;
+  dirs: { name: string; path: string; git: boolean }[];
+  /** More folders exist than were listed. */
+  truncated: boolean;
+}
+
+export interface SkillImport {
+  added: string[];
+  updated: string[];
+  skipped: { where: string; reason: string }[];
+}
+
+export type ProfileInput = Pick<AgentProfile, 'name' | 'job' | 'title' | 'provider' | 'context' | 'imageUrl' | 'model' | 'skillIds'>;
 
 async function request<T>(method: string, url: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(url, {
@@ -28,6 +48,17 @@ export const api = {
     request<Card>('POST', `/api/cards/${id}/move`, { stage, beforeId, afterId }),
   abort: (id: number) => request<Card>('POST', `/api/cards/${id}/abort`),
   merge: (id: number) => request<Card>('POST', `/api/cards/${id}/merge`),
+  sync: (projectId: number, kind: 'pull' | 'push') => request<Card>('POST', `/api/projects/${projectId}/sync/${kind}`),
+  projectUsage: (projectId: number) => request<{ byProfile: Record<number, UsageTotals>; total: UsageTotals | null }>('GET', `/api/projects/${projectId}/usage`),
+  createProfile: (body: ProfileInput) => request<AgentProfile>('POST', '/api/profiles', body),
+  updateProfile: (id: number, body: Partial<ProfileInput>) => request<AgentProfile>('PATCH', `/api/profiles/${id}`, body),
+  removeProfile: (id: number) => request<void>('DELETE', `/api/profiles/${id}`),
+  skill: (id: number) => request<{ skill: Skill; content: string; files: string[] }>('GET', `/api/skills/${id}`),
+  importSkillFolder: (body: { source: string; skills: { where: string; files: { path: string; data: string }[] }[] }) =>
+    request<SkillImport>('POST', '/api/skills/import/folder', body),
+  importSkillGithub: (url: string) => request<SkillImport>('POST', '/api/skills/import/github', { url }),
+  importSkillsSh: (ref: string) => request<SkillImport>('POST', '/api/skills/import/skills-sh', { ref }),
+  removeSkill: (id: number) => request<void>('DELETE', `/api/skills/${id}`),
   hide: (id: number, hidden: boolean) => request<Card>('POST', `/api/cards/${id}/hide`, { hidden }),
   comment: (id: number, body: string, secrets: Record<string, string>) =>
     request<void>('POST', `/api/cards/${id}/comment`, { body, secrets }),
@@ -38,7 +69,9 @@ export const api = {
   createProject: (body: { name: string; settings: Partial<Settings> }) => request<Project>('POST', '/api/projects', body),
   updateProject: (id: number, body: { name?: string; settings?: Partial<Settings> }) => request<Project>('PATCH', `/api/projects/${id}`, body),
   ask: (body: string) => request<void>('POST', '/api/assistant/messages', { body }),
-  assistantSettings: (patch: Partial<AssistantSettings>) => request<AssistantSettings>('PATCH', '/api/assistant/settings', patch),
+  refreshProviders: () => request<ProviderStatus[]>('POST', '/api/providers/refresh'),
+  setProvider: (id: ProviderId, enabled: boolean) => request<ProviderStatus[]>('PATCH', `/api/providers/${id}`, { enabled }),
+  folders: (path: string, hidden: boolean) => request<FolderListing>('GET', `/api/fs/dirs?path=${encodeURIComponent(path)}${hidden ? '&hidden=1' : ''}`),
 
   async upload(file: File): Promise<string> {
     const res = await fetch('/api/uploads', { method: 'POST', headers: { 'content-type': file.type }, body: file });

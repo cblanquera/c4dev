@@ -1,6 +1,14 @@
 import { Icon } from './Icon.tsx';
 import type { DragEvent } from 'react';
-import type { Card } from '../../../server/types.ts';
+import { CARD_KIND_LABELS, type Card, type CardKind } from '../../../server/types.ts';
+
+/** Integration cards carry the operation's icon so they read differently from your tasks. */
+export const KIND_ICON = { merge: 'git-merge', pull: 'arrow-down-to-line', push: 'arrow-up-from-line' } as const satisfies Record<Exclude<CardKind, 'task'>, string>;
+
+export function KindBadge({ card }: { card: Card }) {
+  if (card.kind === 'task') return null;
+  return <span className={`badge kind-badge kind-${card.kind}`} title="Queued by the factory, not written by you"><Icon name={KIND_ICON[card.kind]} size={12} />{CARD_KIND_LABELS[card.kind]}</span>;
+}
 
 const BUSY = new Set(['planning', 'running', 'testing', 'auditing', 'deciding', 'replying', 'merging']);
 
@@ -39,7 +47,7 @@ export function CardTile({ card, selected, draggable, dragging, onOpen, onDragSt
   const stale = card.stage === 'icebox' && (!card.instructions.trim() ? 'No agent instructions yet' : !card.instructionsCurrent ? 'Instructions are outdated' : '');
   return (
     <article
-      className={`card ${selected ? 'selected' : ''} ${dragging ? 'dragging' : ''} ${draggable ? 'draggable' : ''}`}
+      className={`card kind-${card.kind} ${selected ? 'selected' : ''} ${dragging ? 'dragging' : ''} ${draggable ? 'draggable' : ''}`}
       draggable={draggable}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
@@ -52,9 +60,11 @@ export function CardTile({ card, selected, draggable, dragging, onOpen, onDragSt
       }}
       tabIndex={0}
       aria-label={`Card ${card.id}: ${card.title}`}
+      data-kind={card.kind}
     >
       <div className="card-top">
         <span className="mono muted">#{card.id}</span>
+        <KindBadge card={card} />
         {card.deliverableKind && <span className={`badge d-${card.deliverableKind}`}>{DELIVERABLE_LABEL[card.deliverableKind]}</span>}
         <MergeBadge card={card} />
         <span className="spacer" />

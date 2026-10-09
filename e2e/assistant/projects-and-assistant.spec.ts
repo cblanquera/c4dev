@@ -33,32 +33,53 @@ test.describe('Journey: one assistant for every project', () => {
 
   test('a new project needs its own git repository', async ({ page }) => {
     const name = `Shop ${test.info().project.name}`;
-    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-e2e-shop-'));
+    // Its own parent folder, so the folder browser lists only it.
+    const parentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-e2e-shop-'));
+    const repo = path.join(parentDir, 'shop');
+    fs.mkdirSync(repo);
     try {
       await page.goto('/');
       await page.getByRole('button', { name: 'New project' }).click();
       const dialog = page.getByRole('dialog', { name: 'New project' });
       // Settings are split into sections with a menu.
       const sections = dialog.getByRole('tablist', { name: 'Settings sections' });
-      await sections.getByRole('tab', { name: 'Agents' }).click();
-      await expect(dialog.getByLabel('Driver')).toBeVisible();
+      await expect(sections.getByRole('tab')).toHaveText(['Project', 'Team', 'Quality gates']);
+      await sections.getByRole('tab', { name: 'Team' }).click();
+      await expect(dialog.getByLabel('Cards in flight')).toBeVisible();
       await expect(dialog.getByLabel('Name')).toHaveCount(0);
       await expect(dialog.getByRole('button', { name: 'Create project' })).toBeDisabled();
       await expectNoHorizontalOverflow(page);
       await sections.getByRole('tab', { name: 'Project' }).click();
       await dialog.getByLabel('Name').fill(name);
-      await dialog.getByLabel('Repository path').fill(repo);
+      // The folder browser lists folders by name and marks git repositories.
+      const choose = async () => {
+        await dialog.getByRole('button', { name: 'Choose…' }).click();
+        const picker = page.getByRole('dialog', { name: 'Choose a folder' });
+        await picker.getByLabel('Folder path').fill(path.dirname(repo));
+        await picker.getByLabel('Folder path').press('Enter');
+        await picker.getByRole('list', { name: 'Folders' }).getByRole('button', { name: new RegExp(`^${path.basename(repo)}`) }).click();
+        await expect(picker.getByLabel('Folder path')).toHaveValue(repo);
+        return picker;
+      };
+      let picker = await choose();
+      await expect(picker).not.toContainText('This folder is a git repository');
+      await picker.getByRole('button', { name: 'Use this folder' }).click();
+      await expect(dialog.getByLabel('Project path')).toHaveValue(repo);
       await dialog.getByRole('button', { name: 'Create project' }).click();
       await expect(page.getByRole('alert')).toContainText('Not a git repository');
 
       execFileSync('git', ['init', '-q', '-b', 'main', repo]);
+      picker = await choose();
+      await expect(picker).toContainText('This folder is a git repository');
+      await expectNoHorizontalOverflow(page);
+      await picker.getByRole('button', { name: 'Use this folder' }).click();
       await dialog.getByRole('button', { name: 'Create project' }).click();
       await expect(page).toHaveURL(/#project-\d+$/);
       await expect(page.getByRole('heading', { level: 1, name })).toBeVisible();
       await page.getByRole('link', { name: /^All projects/ }).click();
       await expect(page.getByRole('listitem').filter({ has: page.getByRole('link', { name: `${name} board` }) })).toContainText('No cards yet');
     } finally {
-      fs.rmSync(repo, { recursive: true, force: true });
+      fs.rmSync(parentDir, { recursive: true, force: true });
     }
   });
 

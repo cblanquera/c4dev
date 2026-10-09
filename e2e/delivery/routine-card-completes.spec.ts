@@ -27,11 +27,16 @@ test.describe('Journey: delivering a routine card', () => {
     await page.getByRole('tab', { name: 'Overview', exact: true }).click();
     await expect(page.getByText(`Not merged · Kept on factory/card-${id}`)).toBeVisible();
 
-    // Merging lands the verified branch on main; nothing has moved main, so it stays in Complete.
+    // Merging queues a merge card, marked as the factory's own; the finished card stays in Complete.
     page.once('dialog', (dialog) => dialog.accept());
     await page.getByRole('button', { name: 'Merge into main' }).click();
+    await expect(page).not.toHaveURL(new RegExp(`#card-${id}$`));
+    const merge = Number(page.url().match(/#card-(\d+)$/)![1]);
     await expect(tile(page, id).getByRole('img', { name: 'Merged' })).toBeVisible();
-    await expect(page.getByText('Merged into main', { exact: true })).toBeVisible();
+    await expect(column(page, 'Complete').locator(`[data-card-id="${merge}"]`).locator('[data-kind="merge"]')).toBeVisible();
+    await page.goto(`/#card-${id}`);
+    await page.getByRole('tab', { name: 'Overview', exact: true }).click();
+    await expect(page.getByText(`Merged into main by #${merge}`)).toBeVisible();
     await expect(page.getByRole('button', { name: 'Merge into main' })).toHaveCount(0);
 
     // Subtasks show the plan, the audit rework round and the acceptance scripts.

@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"01a120f5-407c-7e00-955d-65ccc7cc6cd4"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll read README.md and return its title."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'cat README.md'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'cat README.md'","aggregated_output":"# Smoke Repo\n\nA tiny repository for testing.\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"{\"title\":\"Smoke Repo\"}"}}
+{"type":"turn.completed","usage":{"input_tokens":45809,"cached_input_tokens":22656,"cache_write_input_tokens":0,"output_tokens":100,"reasoning_output_tokens":18}}

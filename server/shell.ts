@@ -26,6 +26,8 @@ export function run(command: string, opts: RunOptions): Promise<RunResult> {
       env: { ...parentEnv, CI: '1', FORCE_COLOR: '0', ...opts.env },
       detached: process.platform !== 'win32',
     });
+    // Nothing is ever piped in; an open stdin makes some CLIs (e.g. `codex exec`) wait for input forever.
+    child.stdin?.end();
     let output = '';
     let partial = '';
     const onData = (chunk: Buffer) => {

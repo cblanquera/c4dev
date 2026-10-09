@@ -37,10 +37,80 @@ export type DeliverableKind = 'approval' | 'input' | 'blocked';
  */
 export type MergeState = 'merged' | 'unmerged' | 'blocked';
 
+/**
+ * task: written by the user. merge, pull and push: integration work the
+ * factory queues itself, starting in the Backlog.
+ */
+export const CARD_KINDS = ['task', 'merge', 'pull', 'push'] as const;
+export type CardKind = (typeof CARD_KINDS)[number];
+export const CARD_KIND_LABELS: Record<CardKind, string> = { task: 'Task', merge: 'Merge', pull: 'Pull', push: 'Push' };
+
+/**
+ * A profile's role: what it does. Ids are stable storage keys; `developer` is
+ * shown as Worker and `senior` as Architect.
+ */
+export const AGENT_JOBS = ['coordinator', 'developer', 'auditor', 'senior', 'assistant'] as const;
+export type AgentJob = (typeof AGENT_JOBS)[number];
+export const JOB_LABELS: Record<AgentJob, string> = {
+  coordinator: 'Coordinator', developer: 'Worker', auditor: 'Auditor', senior: 'Architect', assistant: 'Chief of Staff',
+};
+
+/** A named agent the user can recognise: a picture, a brief, a model and skills. */
+export interface AgentProfile {
+  id: number;
+  name: string;
+  job: AgentJob;
+  /** Shown beside the name, e.g. "Frontend Developer"; empty shows the role. */
+  title: string;
+  /** Markdown added to the instructions of every run this profile does. */
+  context: string;
+  imageUrl: string | null;
+  /** What runs this profile: the simulation or a provider. */
+  provider: DriverName;
+  /** The model on that provider; empty uses the provider's default. */
+  model: string;
+  skillIds: number[];
+  createdAt: number;
+  /** Deleted profiles are archived, so recorded activity keeps their name and picture. */
+  archived: boolean;
+}
+
+/** A skill in the library: a folder with a SKILL.md and any files it uses. Content is fetched separately. */
+export interface Skill {
+  id: number;
+  name: string;
+  description: string;
+  /** Where it came from, e.g. "GitHub: owner/repo" or "Folder: my-skills". */
+  source: string;
+  fileCount: number;
+  createdAt: number;
+}
+
+export interface UsageTotals {
+  runs: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /** An estimate from the SDK, not a bill. */
+  costUsd: number;
+}
+
+/** Tokens and cost of one agent run. */
+export interface UsageRecord extends Omit<UsageTotals, 'runs'> {
+  id: number;
+  projectId: number | null;
+  cardId: number | null;
+  profileId: number | null;
+  model: string;
+  ts: number;
+}
+
 export interface Card {
   id: number;
   /** Card ids are unique across projects, so `#12` always means one card. */
   projectId: number;
+  kind: CardKind;
   title: string;
   description: string;
   instructions: string;
@@ -96,6 +166,8 @@ export interface Subtask {
   dependsOn: number[];
   status: SubtaskStatus;
   worker: string | null;
+  /** The agent profile that did (or is doing) this subtask. */
+  profileId: number | null;
   branch: string | null;
   worktree: string | null;
   summary: string;
@@ -120,6 +192,8 @@ export interface LogEntry {
   cardId: number;
   subtaskId: number | null;
   actor: string;
+  /** The profile that wrote it; role logs without one show the project's current profile for that role. */
+  profileId: number | null;
   level: LogLevel;
   text: string;
   ts: number;
@@ -139,16 +213,34 @@ export interface Comment {
   ts: number;
 }
 
-export type DriverName = 'simulated' | 'claude';
+/** Agent CLIs the factory knows about. */
+export const PROVIDERS = ['claude', 'codex', 'opencode', 'pi'] as const;
+export type ProviderId = (typeof PROVIDERS)[number];
+export const PROVIDER_LABELS: Record<ProviderId, string> = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode', pi: 'Pi' };
+/** Providers with a driver. A new provider can be set up before it joins this list, but not chosen. */
+export const WORK_PROVIDERS: readonly ProviderId[] = ['claude', 'codex', 'opencode', 'pi'];
+
+/** What runs a project's (or the assistant's) agents: the token-free simulation or a provider. */
+export type DriverName = 'simulated' | ProviderId;
+
+/** A provider as this machine has it: installed or not, switched on or off. */
+export interface ProviderStatus {
+  id: ProviderId;
+  label: string;
+  command: string;
+  available: boolean;
+  version: string | null;
+  path: string | null;
+  enabled: boolean;
+  runsWork: boolean;
+  /** Model ids to suggest; empty means type any id. */
+  models: string[];
+}
 
 export interface Settings {
   /** Absolute path to the git repository agents work on. */
   repoPath: string;
   baseBranch: string;
-  driver: DriverName;
-  model: string;
-  /** Model used by the senior auditor. */
-  seniorModel: string;
   /** Max cards the coordinator works on at once. */
   maxActiveCards: number;
   /** Max worker agents running at once, across all cards. */
@@ -161,7 +253,7 @@ export interface Settings {
   coverageTarget: number;
   /** {card} expands to the card id. */
   acceptanceCommand: string;
-  /** Focus areas for the senior audit; one pass per lens. */
+  /** Focus areas for the architect's review; one pass per lens. */
   auditLenses: string[];
   /** Bounces back to In Progress before the card is escalated to Deliverables. */
   maxLoops: number;
@@ -169,6 +261,10 @@ export interface Settings {
   onComplete: 'keep' | 'merge';
   completeRetentionDays: number;
   paused: boolean;
+  /** Profiles that work on this project; empty means every profile. */
+  team: number[];
+  /** Git remote to pull from and push to, when the repository has it. */
+  remote: string;
 }
 
 /** One repository with its own board, coordinator and settings. */
@@ -177,12 +273,8 @@ export interface Project {
   name: string;
   settings: Settings;
   createdAt: number;
-}
-
-/** The assistant has its own driver, independent of any project. */
-export interface AssistantSettings {
-  driver: DriverName;
-  model: string;
+  /** The configured remote's URL, when the repository has that remote. */
+  remoteUrl: string | null;
 }
 
 /**
@@ -207,7 +299,6 @@ export interface AssistantMessage {
 export interface AssistantState {
   messages: AssistantMessage[];
   busy: boolean;
-  settings: AssistantSettings;
 }
 
 export type FactoryEvent =
@@ -221,7 +312,11 @@ export type FactoryEvent =
   | { type: 'coordinator'; projectId: number; text: string; ts: number }
   | { type: 'assistant_message'; message: AssistantMessage }
   | { type: 'assistant_busy'; busy: boolean }
-  | { type: 'assistant_settings'; settings: AssistantSettings };
+  | { type: 'profile'; profile: AgentProfile }
+  | { type: 'skill'; skill: Skill }
+  | { type: 'skill_removed'; id: number }
+  | { type: 'usage'; record: UsageRecord }
+  | { type: 'providers'; providers: ProviderStatus[] };
 
 /** Everything a client needs on (re)connect. */
 export interface FactoryState {
@@ -230,6 +325,10 @@ export interface FactoryState {
   /** Prefills the new-project form. */
   projectDefaults: Settings;
   assistant: AssistantState;
+  profiles: AgentProfile[];
+  skills: Skill[];
+  providers: ProviderStatus[];
+  usage: { byProject: Record<number, UsageTotals>; byProfile: Record<number, UsageTotals> };
 }
 
 export interface CardDetail {
@@ -239,6 +338,7 @@ export interface CardDetail {
   comments: Comment[];
   deliveryNotes: string;
   chatBusy: boolean;
+  usage: UsageTotals;
 }
 
 /** Processes the factory can identify and stop without accepting arbitrary PIDs. */

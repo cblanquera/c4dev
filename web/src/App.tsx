@@ -6,18 +6,26 @@ import { Board } from './components/Board.tsx';
 import { Home } from './components/Home.tsx';
 import { CardEditor } from './components/CardEditor.tsx';
 import { CardPanel } from './components/CardPanel.tsx';
-import { AssistantSettingsDialog, SettingsDialog } from './components/SettingsDialog.tsx';
+import { SettingsDialog } from './components/SettingsDialog.tsx';
+import { SettingsPage, type SettingsSection } from './components/SettingsPage.tsx';
 import { ProcessPopover } from './components/ProcessPopover.tsx';
+import { DirectoryContext, ProjectScope, teamProviders } from './agents.ts';
+import { go, goHome } from './nav.ts';
 import { ACTIVE_STAGES, STAGE_LABELS } from '../../server/types.ts';
 
 /**
  * Routing lives in the URL hash. No hash is home: projects beside the
  * assistant. #project-2 is a board and #project-2/new adds a card to it.
  * #card-12 and #new-after-12 open a panel on that card's board, while
- * #chat/card-12 opens the panel over the assistant instead.
+ * #chat/card-12 opens the panel over the assistant instead. #settings and
+ * #settings/agents open the settings page at a section (#settings/assistant,
+ * from before the assistant joined the agents, opens Agents).
  */
 type Panel = { kind: 'none' } | { kind: 'card'; id: number } | { kind: 'new'; parentId: number | null };
-type Route = { view: 'home'; panel: Panel } | { view: 'board'; projectId: number | null; panel: Panel };
+type Route =
+  | { view: 'home'; panel: Panel }
+  | { view: 'settings'; section: SettingsSection; panel: Panel }
+  | { view: 'board'; projectId: number | null; panel: Panel };
 
 const NO_PANEL: Panel = { kind: 'none' };
 
@@ -30,16 +38,11 @@ function parseHash(hash: string): Route {
   if (m) return { view: 'board', projectId: null, panel: { kind: 'new', parentId: Number(m[1]) } };
   m = hash.match(/^#project-(\d+)(\/new)?$/);
   if (m) return { view: 'board', projectId: Number(m[1]), panel: m[2] ? { kind: 'new', parentId: null } : NO_PANEL };
+  m = hash.match(/^#settings(?:\/(assistant|agents|skills|providers))?$/);
+  if (m) return { view: 'settings', section: (!m[1] || m[1] === 'assistant' ? 'agents' : m[1]) as SettingsSection, panel: NO_PANEL };
   return { view: 'home', panel: NO_PANEL };
 }
 
-const go = (hash: string) => {
-  if (location.hash !== hash) location.hash = hash;
-};
-function goHome() {
-  history.pushState(null, '', location.pathname + location.search);
-  window.dispatchEvent(new HashChangeEvent('hashchange'));
-}
 
 /** Id of the newest assistant message read on the home screen, per browser. */
 const SEEN_KEY = 'factory.assistantSeen';
@@ -50,13 +53,14 @@ const Logo = () => (
 
 export function App() {
   const [route, setRoute] = useState<Route>(() => parseHash(location.hash));
-  const [dialog, setDialog] = useState<'project' | 'new-project' | 'assistant' | null>(null);
+  const [dialog, setDialog] = useState<'project' | 'new-project' | null>(null);
   const [wide, setWide] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [seen, setSeen] = useState(() => Number(localStorage.getItem(SEEN_KEY) ?? 0));
   const { panel } = route;
   const openId = panel.kind === 'card' ? panel.id : null;
-  const { cardList, cards, projects, projectList, projectDefaults, assistant, feed, detail, connected } = useFactory(openId);
+  const { cardList, cards, projects, projectList, profiles, profileList, skills, usage, providers, projectDefaults, assistant, feed, detail, connected } = useFactory(openId);
+  const [syncing, setSyncing] = useState(false);
 
   // A card knows its project, so #card-12 links work from any board or the assistant.
   const anchorId = panel.kind === 'card' ? panel.id : panel.kind === 'new' ? panel.parentId : null;
@@ -108,15 +112,33 @@ export function App() {
   const working = projectCards.filter((c) => ACTIVE_STAGES.includes(c.stage)).length;
   const missingBoard = route.view === 'board' && !project;
 
+  /** Pull and Push buttons queue an integration card and open it. */
+  async function sync(kind: 'pull' | 'push') {
+    if (!project) return;
+    setSyncing(true);
+    try {
+      const card = await api.sync(project.id, kind);
+      go(`#card-${card.id}`);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Failed');
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   return (
+    <DirectoryContext.Provider value={{ profiles, projects }}>
     <div className={`app ${panelOpen ? 'panel-open' : ''} ${wide ? 'panel-wide' : ''}`}>
-      {route.view === 'home' || missingBoard ? (
+      {route.view === 'home' || route.view === 'settings' || missingBoard ? (
         <header className="topbar">
-          <div className="brand"><Logo /></div>
+          {route.view === 'settings'
+            ? <a className="brand home-link" href="#" onClick={(e) => { e.preventDefault(); goHome(); }} aria-label="All projects" title="All projects"><Logo /></a>
+            : <div className="brand"><Logo /></div>}
+          {route.view === 'settings' && <h1 className="topbar-title">Settings</h1>}
           <span className={`conn ${connected ? 'on' : 'off'}`} title={connected ? 'Live' : 'Reconnecting…'} />
           <div className="top-actions">
             <ProcessPopover onError={onError} />
-            <button className="ghost" onClick={() => setDialog('assistant')} aria-label="Assistant settings" title="Assistant settings"><Icon name="settings" /></button>
+            {route.view !== 'settings' && <button className="ghost" onClick={() => go('#settings')} aria-label="Settings" title="Settings: assistant, agents and skills"><Icon name="settings" /></button>}
           </div>
         </header>
       ) : project && (
@@ -139,12 +161,19 @@ export function App() {
               <span className="knob" />
             </button>
             <span className="coord-label hide-sm">{project.settings.paused ? 'Paused' : 'Coordinator'}</span>
-            <span className={`badge hide-sm ${project.settings.driver === 'simulated' ? 'd-approval' : 'subtle'}`} title="Agent driver (change in Settings)">{project.settings.driver === 'simulated' ? 'Simulated' : project.settings.model}</span>
+            {(() => {
+              const runs = teamProviders(project, profileList);
+              return <span className={`badge hide-sm ${runs.simulated ? 'd-approval' : 'subtle'}`} title="What this project's agents run on (each agent's provider)">{runs.label}</span>;
+            })()}
             <span className="muted small hide-sm">{working} in flight{deliverables ? ' · ' : ''}</span>
             {deliverables > 0 && <span className="badge d-input hide-sm">{deliverables} need{deliverables === 1 ? 's' : ''} you</span>}
           </div>
           <div className="feed hide-sm" aria-live="polite">{feed.find((f) => f.projectId === project.id)?.text}</div>
           <div className="top-actions">
+            {project.remoteUrl && <>
+              <button className="ghost" disabled={syncing} onClick={() => sync('pull')} aria-label="Pull" title={`Pull ${project.settings.remote}/${project.settings.baseBranch} into ${project.settings.baseBranch}`}><Icon name="arrow-down-to-line" /><span className="hide-sm">Pull</span></button>
+              <button className="ghost" disabled={syncing} onClick={() => sync('push')} aria-label="Push" title={`Push ${project.settings.baseBranch} to ${project.settings.remote}`}><Icon name="arrow-up-from-line" /><span className="hide-sm">Push</span></button>
+            </>}
             <ProcessPopover onError={onError} />
             <button className="ghost" onClick={() => setDialog('project')} aria-label="Settings" title="Settings"><Icon name="settings" /></button>
             <button className="primary" onClick={() => go(`#project-${project.id}/new`)} aria-label="New card"><Icon name="plus" /><span className="hide-sm"> New card</span></button>
@@ -153,11 +182,14 @@ export function App() {
       )}
 
       {route.view === 'home' && (
-        <Home projects={projectList} projectMap={projects} cards={cards} cardList={cardList} assistant={assistant}
+        <Home projects={projectList} projectMap={projects} cards={cards} cardList={cardList} assistant={assistant} usage={usage.byProject} profiles={profileList}
           onNewProject={() => setDialog('new-project')} onCardClick={openCard} onError={onError} />
       )}
+      {route.view === 'settings' && (
+        <SettingsPage section={route.section} profiles={profileList} skills={skills} projects={projectList} usage={usage.byProfile} providers={providers} onError={onError} />
+      )}
       {route.view === 'board' && project && (
-        <Board cards={projectCards} settings={project.settings} selectedId={openId} onOpen={openCard} onNew={() => go(`#project-${project.id}/new`)} onError={onError} />
+        <Board key={project.id} projectId={project.id} cards={projectCards} settings={project.settings} selectedId={openId} onOpen={openCard} onNew={() => go(`#project-${project.id}/new`)} onError={onError} />
       )}
       {missingBoard && (
         <main className="pad">
@@ -186,6 +218,7 @@ export function App() {
             <button className="ghost hide-sm" onClick={() => setWide((w) => !w)} title={wide ? 'Narrow panel' : 'Widen panel'} aria-label="Toggle panel width"><Icon name={wide ? 'minimize-2' : 'maximize-2'} /></button>
             <button className="ghost" onClick={closePanel} aria-label="Close panel"><Icon name="x" /></button>
           </header>
+          <ProjectScope.Provider value={current?.projectId ?? projectId}>
           <div className="panel-body">
             {panel.kind === 'new' && projectId != null && (
               <CardEditor key={`new-${projectId}-${panel.parentId}`} card={null} projectId={projectId} parentId={panel.parentId} cards={projectCards} onSaved={(c) => openCard(c.id)} onDeleted={closePanel} onCardClick={openCard} onError={onError} />
@@ -198,17 +231,18 @@ export function App() {
             )}
             {panel.kind === 'card' && !current && <p className="muted pad">This card doesn’t exist.</p>}
           </div>
+          </ProjectScope.Provider>
         </aside>
       )}
 
       {dialog === 'project' && project && (
-        <SettingsDialog project={project} defaults={projectDefaults} onClose={() => setDialog(null)} onSaved={() => setDialog(null)} onError={onError} />
+        <SettingsDialog project={project} defaults={projectDefaults} profiles={profileList} onClose={() => setDialog(null)} onSaved={() => setDialog(null)} onError={onError} />
       )}
       {dialog === 'new-project' && (
-        <SettingsDialog project={null} defaults={projectDefaults} onClose={() => setDialog(null)} onSaved={(p) => { setDialog(null); go(`#project-${p.id}`); }} onError={onError} />
+        <SettingsDialog project={null} defaults={projectDefaults} profiles={profileList} onClose={() => setDialog(null)} onSaved={(p) => { setDialog(null); go(`#project-${p.id}`); }} onError={onError} />
       )}
-      {dialog === 'assistant' && <AssistantSettingsDialog settings={assistant.settings} onClose={() => setDialog(null)} onError={onError} />}
       {toast && <div className="toast" role="alert" onClick={() => setToast(null)}>{toast}</div>}
     </div>
+    </DirectoryContext.Provider>
   );
 }

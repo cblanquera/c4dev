@@ -40,8 +40,8 @@ async function addWorktree(repoPath: string, dir: string, branch: string, from: 
   return dir;
 }
 
-export async function createCardWorktree(repoPath: string, baseBranch: string, cardId: number) {
-  const branch = cardBranch(cardId);
+/** A card's worktree, on its own branch, or on `branch` (e.g. the finished card a merge card lands). */
+export async function createCardWorktree(repoPath: string, baseBranch: string, cardId: number, branch = cardBranch(cardId)) {
   const dir = path.join(worktreeRoot(repoPath), `card-${cardId}`);
   await addWorktree(repoPath, dir, branch, baseBranch);
   return { branch, worktree: dir };
@@ -50,7 +50,7 @@ export async function createCardWorktree(repoPath: string, baseBranch: string, c
 export async function createSubtaskWorktree(repoPath: string, card: Card, subtask: Subtask) {
   const branch = subtaskBranch(card.id, subtask.seq);
   const dir = path.join(worktreeRoot(repoPath), `card-${card.id}-s${subtask.seq}`);
-  await addWorktree(repoPath, dir, branch, cardBranch(card.id));
+  await addWorktree(repoPath, dir, branch, card.branch ?? cardBranch(card.id));
   return { branch, worktree: dir };
 }
 
@@ -118,10 +118,64 @@ export async function archiveCard(repoPath: string, cardId: number, worktrees: (
   return archived;
 }
 
-/** True when `ancestor` is contained in `descendant` (both branch names), false when not, null when either is missing. */
+/** A branch name as a full ref; full refs (e.g. refs/remotes/origin/main) pass through. */
+const fullRef = (name: string) => (name.startsWith('refs/') ? name : `refs/heads/${name}`);
+
+/** True when `ancestor` is contained in `descendant` (branch names or full refs), false when not, null when either is missing. */
 export async function isAncestor(repoPath: string, ancestor: string, descendant: string): Promise<boolean | null> {
-  const res = await run(`git merge-base --is-ancestor ${shellQuote(`refs/heads/${ancestor}`)} ${shellQuote(`refs/heads/${descendant}`)}`, { cwd: repoPath });
+  const res = await run(`git merge-base --is-ancestor ${shellQuote(fullRef(ancestor))} ${shellQuote(fullRef(descendant))}`, { cwd: repoPath });
   return res.code === 0 ? true : res.code === 1 ? false : null;
+}
+
+/** Commit id of a branch or ref, or null when it doesn't exist. */
+export async function tipOf(repoPath: string, name: string): Promise<string | null> {
+  const res = await run(`git rev-parse -q --verify ${shellQuote(`${fullRef(name)}^{commit}`)}`, { cwd: repoPath });
+  return res.code === 0 ? res.output.trim() : null;
+}
+
+/** Network git must fail rather than wait on a credential prompt nobody will see. */
+const NO_PROMPT = { GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' };
+const NETWORK_TIMEOUT_MS = 120_000;
+
+/** The remote-tracking ref for a remote's branch. */
+export const remoteRef = (remote: string, branch: string) => `refs/remotes/${remote}/${branch}`;
+
+/** Fetches one branch from the remote, using the machine's own git credentials. */
+export async function fetchRemote(repoPath: string, remote: string, branch: string, signal?: AbortSignal): Promise<{ ok: boolean; output: string }> {
+  const res = await run(`git fetch ${shellQuote(remote)} ${shellQuote(`+refs/heads/${branch}:${remoteRef(remote, branch)}`)}`,
+    { cwd: repoPath, signal, env: NO_PROMPT, timeoutMs: NETWORK_TIMEOUT_MS });
+  return { ok: res.code === 0, output: res.output.trim() };
+}
+
+/** Pushes the base branch without force. `rejected` means the remote moved and has to be integrated first. */
+export async function pushBranch(repoPath: string, remote: string, branch: string, signal?: AbortSignal): Promise<{ ok: boolean; rejected: boolean; output: string }> {
+  const res = await run(`git push ${shellQuote(remote)} ${shellQuote(`refs/heads/${branch}:refs/heads/${branch}`)}`,
+    { cwd: repoPath, signal, env: NO_PROMPT, timeoutMs: NETWORK_TIMEOUT_MS });
+  return { ok: res.code === 0, rejected: /\[rejected\]|non-fast-forward|fetch first/i.test(res.output), output: res.output.trim() };
+}
+
+/**
+ * Moves the base branch forward to `target` (which must contain it), touching
+ * the main checkout only when it has the base branch checked out and is clean.
+ */
+export async function fastForward(repoPath: string, baseBranch: string, target: string): Promise<PublishResult> {
+  const steps: string[] = [];
+  const from = await git(repoPath, 'rev-parse', fullRef(baseBranch));
+  const to = await git(repoPath, 'rev-parse', `${fullRef(target)}^{commit}`);
+  const head = await git(repoPath, 'rev-parse', '--abbrev-ref', 'HEAD');
+  if (head === baseBranch) {
+    steps.push(`$ git status --porcelain  # in the main checkout, which has ${baseBranch} checked out`);
+    if (await git(repoPath, 'status', '--porcelain')) return { ok: false, moved: false, reason: 'main checkout has uncommitted changes', steps };
+    const res = await run(`git merge --ff-only ${shellQuote(fullRef(target))}`, { cwd: repoPath });
+    steps.push(`$ git merge --ff-only ${target}${res.code === 0 ? '' : '  # refused'}`);
+    if (res.code !== 0) return { ok: false, moved: true, reason: `${baseBranch} can't fast-forward`, steps };
+  } else {
+    const res = await run(`git update-ref ${shellQuote(fullRef(baseBranch))} ${shellQuote(to)} ${shellQuote(from)}`, { cwd: repoPath });
+    steps.push(`$ git update-ref ${fullRef(baseBranch)} ${short(to)} ${short(from)}${res.code === 0 ? '  # the main checkout is untouched' : '  # refused: the branch moved meanwhile'}`);
+    if (res.code !== 0) return { ok: false, moved: true, reason: `${baseBranch} has moved`, steps };
+  }
+  steps.push(`# ${baseBranch}: ${short(from)} → ${short(to)}`);
+  return { ok: true, moved: false, reason: '', steps };
 }
 
 export interface PublishResult {

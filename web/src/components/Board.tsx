@@ -2,8 +2,30 @@
 import { Icon } from './Icon.tsx';
 import { useMemo, useState, type DragEvent } from 'react';
 import { api } from '../api.ts';
-import { CardTile } from './CardTile.tsx';
-import { STAGES, STAGE_LABELS, type Card, type Settings, type Stage } from '../../../server/types.ts';
+import { CardTile, KIND_ICON } from './CardTile.tsx';
+import { CARD_KINDS, STAGES, STAGE_LABELS, type Card, type CardKind, type Settings, type Stage } from '../../../server/types.ts';
+
+const KIND_FILTER_LABELS: Record<CardKind, string> = { task: 'Tasks', merge: 'Merges', pull: 'Pulls', push: 'Pushes' };
+
+/** Which card types a board shows, remembered per project in this browser. */
+function useKindFilter(projectId: number): [Set<CardKind>, (kind: CardKind) => void] {
+  const key = `factory.cardKinds.${projectId}`;
+  const [shown, setShown] = useState<Set<CardKind>>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(key) ?? 'null');
+      if (Array.isArray(saved)) return new Set(saved.filter((k) => (CARD_KINDS as readonly string[]).includes(k)));
+    } catch { /* fall back to everything */ }
+    return new Set(CARD_KINDS);
+  });
+  const toggle = (kind: CardKind) => setShown((current) => {
+    const next = new Set(current);
+    if (next.has(kind)) next.delete(kind);
+    else next.add(kind);
+    localStorage.setItem(key, JSON.stringify([...next]));
+    return next;
+  });
+  return [shown, toggle];
+}
 
 const DROP_TARGETS: Partial<Record<Stage, Stage[]>> = {
   icebox: ['icebox', 'backlog'],
@@ -11,6 +33,7 @@ const DROP_TARGETS: Partial<Record<Stage, Stage[]>> = {
 };
 
 interface Props {
+  projectId: number;
   cards: Card[];
   settings: Settings;
   selectedId: number | null;
@@ -19,7 +42,9 @@ interface Props {
   onError: (message: string) => void;
 }
 
-export function Board({ cards, settings, selectedId, onOpen, onNew, onError }: Props) {
+export function Board({ projectId, cards: allCards, settings, selectedId, onOpen, onNew, onError }: Props) {
+  const [shownKinds, toggleKind] = useKindFilter(projectId);
+  const cards = useMemo(() => allCards.filter((c) => shownKinds.has(c.kind)), [allCards, shownKinds]);
   const [drag, setDrag] = useState<Card | null>(null);
   const [drop, setDrop] = useState<{ stage: Stage; index: number } | null>(null);
   const [showAllComplete, setShowAllComplete] = useState(false);
@@ -77,6 +102,16 @@ export function Board({ cards, settings, selectedId, onOpen, onNew, onError }: P
   }
 
   return (
+    <>
+    <div className="board-filter" role="group" aria-label="Card types">
+      {CARD_KINDS.map((kind) => (
+        <button key={kind} className={`filter-chip kind-${kind} ${shownKinds.has(kind) ? 'on' : ''}`} aria-pressed={shownKinds.has(kind)} onClick={() => toggleKind(kind)}>
+          {kind !== 'task' && <Icon name={KIND_ICON[kind]} size={12} />}
+          {KIND_FILTER_LABELS[kind]}
+          <span className="count">{allCards.filter((c) => c.kind === kind && !c.hidden).length}</span>
+        </button>
+      ))}
+    </div>
     <main className="board" aria-label="Board">
       {STAGES.map((stage) => {
         const list = columns[stage];
@@ -105,7 +140,7 @@ export function Board({ cards, settings, selectedId, onOpen, onNew, onError }: P
                   <CardTile
                     card={card}
                     selected={card.id === selectedId}
-                    draggable={!!DROP_TARGETS[card.stage]}
+                    draggable={card.kind === 'task' && !!DROP_TARGETS[card.stage]}
                     dragging={drag?.id === card.id}
                     onOpen={() => onOpen(card.id)}
                     onDragStart={(e) => {
@@ -132,5 +167,6 @@ export function Board({ cards, settings, selectedId, onOpen, onNew, onError }: P
         );
       })}
     </main>
+    </>
   );
 }

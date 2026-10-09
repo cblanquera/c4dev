@@ -6,7 +6,7 @@ test('card tabs stay visible while switching and scrolling a long Activity log',
   const state = await (await request.get('/api/state')).json();
   const now = Date.now();
   const card: Card = {
-    id: 900001, projectId: 1, title: 'Activity navigation fixture', description: '# Activity navigation\n\nInspect long logs.',
+    id: 900001, projectId: 1, kind: 'task', title: 'Activity navigation fixture', description: '# Activity navigation\n\nInspect long logs.',
     instructions: 'Check every tab.', instructionsHash: 'current', instructionsCurrent: true,
     stage: 'complete', position: 0, status: 'idle', statusText: 'Complete', tags: [], parentId: 1,
     branch: 'factory/card-900001', worktree: null, loops: 1, coverage: 100, acceptanceReady: true,
@@ -15,7 +15,7 @@ test('card tabs stay visible while switching and scrolling a long Activity log',
   };
   const statuses: SubtaskStatus[] = ['pending', 'running', 'done', 'failed', 'blocked', 'aborted'];
   const detail: CardDetail = {
-    card, comments: [], deliveryNotes: '', chatBusy: false,
+    card, comments: [], deliveryNotes: '', chatBusy: false, usage: { runs: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 },
     subtasks: statuses.map((status, i) => ({
       id: i + 1, cardId: card.id, seq: i + 1, round: 1, kind: 'build', title: `${status} subtask`,
       instructions: 'Inspect status.', doneWhen: 'Status is visible.', dependsOn: [], status,

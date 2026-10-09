@@ -28,6 +28,23 @@ test('deriveTitle uses the first meaningful line', () => {
   assert.equal(deriveTitle(''), 'Untitled task');
 });
 
+// ---------------------------------------------------------------- skill links
+
+const { parseGithubUrl, parseSkillsShRef } = await import('../server/skill-import.ts');
+
+test('GitHub and skills.sh links resolve to repositories, folders and skills', () => {
+  assert.deepEqual(parseGithubUrl('https://github.com/vercel-labs/skills'), { owner: 'vercel-labs', repo: 'skills', ref: null, subpath: '' });
+  assert.deepEqual(parseGithubUrl('https://github.com/acme/tools.git'), { owner: 'acme', repo: 'tools', ref: null, subpath: '' });
+  assert.deepEqual(parseGithubUrl('https://github.com/acme/tools/tree/main/skills/release'), { owner: 'acme', repo: 'tools', ref: 'main', subpath: 'skills/release' });
+  assert.throws(() => parseGithubUrl('http://github.com/acme/tools'), /Only https:\/\/github.com/);
+  assert.throws(() => parseGithubUrl('https://github.com/acme'), /no owner\/repository/);
+  assert.throws(() => parseGithubUrl('https://github.com/acme/tools/blob/main/SKILL.md'), /folder with \/tree/);
+  assert.deepEqual(parseSkillsShRef('https://skills.sh/vercel-labs/skills/find-skills'), { owner: 'vercel-labs', repo: 'skills', skill: 'find-skills' });
+  assert.deepEqual(parseSkillsShRef('mattpocock/skills'), { owner: 'mattpocock', repo: 'skills', skill: null });
+  assert.throws(() => parseSkillsShRef('https://skills.sh/site/open.feishu.cn/lark-doc'), /GitHub-hosted/);
+  assert.throws(() => parseSkillsShRef('just-one'), /skills.sh link/);
+});
+
 // ---------------------------------------------------------------- simulated assistant
 
 const { simulateAssistant } = await import('../server/agents/simulated-assistant.ts');
@@ -80,6 +97,9 @@ test('the simulated assistant acts on the card in context and never on a questio
   assert.deepEqual(act('can you tell #7 that the key is in the vault'), { type: 'message_coordinator', projectId: 0, cardId: 7, body: 'the key is in the vault' });
   assert.deepEqual(act('send card 7 back: rename the job'), { type: 'request_changes', projectId: 0, cardId: 7, body: 'rename the job' });
   assert.equal(act('please merge #4 into main')?.type, 'merge');
+  assert.deepEqual(act('pull the Shop project'), { type: 'pull', projectId: 2, cardId: 0, body: '' });
+  assert.deepEqual(act('can you push demo-repo to github'), { type: 'push', projectId: 1, cardId: 0, body: '' });
+  assert.match(reply('pull').reply, /Which project should I pull/);
   assert.deepEqual([act('ok, merge it')?.type, act('ok, merge it')?.cardId], ['merge', 9]);
   assert.equal(act('should I approve #7?'), undefined);
   assert.equal(act('create a task to approve invoices in Shop')?.type, 'create_card');

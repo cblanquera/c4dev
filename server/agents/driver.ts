@@ -3,12 +3,27 @@
  * The coordinator owns the state machine; a driver only answers questions
  * ("plan this", "build this", "audit this") and reports activity via `log`.
  */
-import type { AssistantMessage, Card, Comment, DeliverableKind, LogLevel, MergeState, Stage, Subtask, SubtaskKind } from '../types.ts';
+import type { AssistantMessage, Card, CardKind, Comment, DeliverableKind, LogLevel, MergeState, Stage, Subtask, SubtaskKind } from '../types.ts';
+import type { RunProfile } from '../profiles.ts';
+
+/** Tokens and estimated cost of one run, per model. */
+export interface RunUsage {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number;
+}
 
 export interface AgentContext {
   signal: AbortSignal;
   /** Record activity in one of the four log forms. */
   log: (level: LogLevel, text: string) => void;
+  /** Who does this run: their brief, model and skills. */
+  profile: RunProfile | null;
+  /** Report what the run used; the caller records it against the project, card and profile. */
+  usage: (usage: RunUsage) => void;
 }
 
 export interface PlannedSubtask {
@@ -57,8 +72,8 @@ export interface CoordinatorReply {
 
 /** Something the assistant asks code to do. Code validates every action before acting. */
 export interface AssistantAction {
-  type: 'create_card' | 'update_card' | 'move_to_backlog' | 'message_coordinator' | 'approve' | 'request_changes' | 'resume' | 'merge';
-  /** Target project for create_card; 0 otherwise. */
+  type: 'create_card' | 'update_card' | 'move_to_backlog' | 'message_coordinator' | 'approve' | 'request_changes' | 'resume' | 'merge' | 'pull' | 'push';
+  /** Target project for create_card, pull and push; 0 otherwise. */
   projectId: number;
   /** Target card for every other action; 0 for create_card. */
   cardId: number;
@@ -82,6 +97,8 @@ export interface ProjectDigest {
   paused: boolean;
   cards: {
     id: number; title: string; stage: Stage; statusText: string; waitingFor: DeliverableKind | null; completedAt: number | null;
+    /** Integration cards (merge, pull, push) are queued by the factory, not written by the user. */
+    kind?: CardKind;
     /** Completed cards only: whether the branch reached the base branch. */
     merge?: MergeState | null;
   }[];
@@ -99,7 +116,7 @@ export interface Driver {
   generateInstructions(
     input: { description: string; references: Card[]; repoPath: string },
     onEvent: (e: InstructionEvent) => void,
-    signal: AbortSignal,
+    ctx: Pick<AgentContext, 'signal' | 'profile' | 'usage'>,
   ): Promise<string>;
 
   plan(input: { card: Card; references: Card[]; repoPath: string }, ctx: AgentContext): Promise<PlannedSubtask[]>;

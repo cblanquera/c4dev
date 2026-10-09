@@ -1,11 +1,12 @@
 /**
  * Live settings. Each project has its own settings (defaults merged with what
- * the user saved); the assistant has its own driver and model.
+ * the user saved). What runs agents is chosen per agent profile.
  */
 import path from 'node:path';
 import * as db from './db.ts';
 import { emit } from './events.ts';
-import type { AssistantSettings, Project, Settings } from './types.ts';
+import { run, shellQuote } from './shell.ts';
+import type { DriverName, Project, Settings } from './types.ts';
 
 export const DATA_DIR = path.resolve(process.env.FACTORY_DATA ?? '.factory');
 
@@ -13,9 +14,6 @@ export function defaultSettings(): Settings {
   return {
     repoPath: path.join(DATA_DIR, 'demo-repo'),
     baseBranch: 'main',
-    driver: 'simulated',
-    model: 'claude-opus-5-5',
-    seniorModel: 'claude-opus-5-5',
     maxActiveCards: 2,
     maxWorkers: 3,
     setupCommand: '',
@@ -34,18 +32,20 @@ export function defaultSettings(): Settings {
     onComplete: 'keep',
     completeRetentionDays: 7,
     paused: false,
+    team: [],
+    remote: 'origin',
   };
 }
 
-export function defaultAssistantSettings(): AssistantSettings {
-  return { driver: 'simulated', model: 'claude-opus-5-5' };
+/** Claude model ids to suggest; any id can still be typed. */
+export const CLAUDE_MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1'];
+
+/** The model a provider uses when a profile picks the provider but no model. */
+export function defaultModel(provider: DriverName): string {
+  return provider === 'claude' ? CLAUDE_MODELS[0] : '';
 }
 
-/** Assistant keys share the key/value table with legacy project settings, so they are prefixed. */
-const ASSISTANT_PREFIX = 'assistant.';
-
 const projects = new Map<number, Project>();
-let assistant: AssistantSettings;
 
 /** Keeps only known setting keys, so stale or hostile input can't add fields. */
 export function pickSettings(input: Record<string, unknown>): Partial<Settings> {
@@ -67,12 +67,8 @@ export function initSettings(): void {
     db.adoptOrphanCards(id);
   }
   for (const row of db.listProjectRows()) {
-    projects.set(row.id, { id: row.id, name: row.name, createdAt: row.createdAt, settings: { ...defaultSettings(), ...row.settings } });
+    projects.set(row.id, { id: row.id, name: row.name, createdAt: row.createdAt, settings: { ...defaultSettings(), ...row.settings }, remoteUrl: null });
   }
-  const saved = Object.fromEntries(Object.entries(stored)
-    .filter(([k]) => k.startsWith(ASSISTANT_PREFIX))
-    .map(([k, v]) => [k.slice(ASSISTANT_PREFIX.length), v]));
-  assistant = { ...defaultAssistantSettings(), ...saved };
 }
 
 export function listProjects(): Project[] {
@@ -93,7 +89,7 @@ export function settings(projectId: number): Settings {
 export function createProject(name: string, patch: Partial<Settings>): Project {
   const full = { ...defaultSettings(), ...patch };
   const id = db.insertProject(name, full);
-  const project: Project = { id, name, settings: full, createdAt: Date.now() };
+  const project: Project = { id, name, settings: full, createdAt: Date.now(), remoteUrl: null };
   projects.set(id, project);
   emit({ type: 'project', project });
   return project;
@@ -109,18 +105,24 @@ export function updateProject(id: number, patch: { name?: string; settings?: Par
   return next;
 }
 
+/**
+ * Looks up the project's remote URL. Pull and push are only offered when the
+ * repository actually has the configured remote.
+ */
+export async function refreshRemote(projectId: number): Promise<Project | undefined> {
+  const project = projects.get(projectId);
+  if (!project) return undefined;
+  const { remote, repoPath } = project.settings;
+  const res = remote.trim() ? await run(`git remote get-url ${shellQuote(remote.trim())}`, { cwd: repoPath }).catch(() => null) : null;
+  const remoteUrl = res?.code === 0 ? res.output.trim() || null : null;
+  const current = projects.get(projectId);
+  if (!current || current.remoteUrl === remoteUrl) return current;
+  const next = { ...current, remoteUrl };
+  projects.set(projectId, next);
+  emit({ type: 'project', project: next });
+  return next;
+}
+
 export function updateSettings(projectId: number, patch: Partial<Settings>): Settings {
   return updateProject(projectId, { settings: patch }).settings;
-}
-
-export function assistantSettings(): AssistantSettings {
-  return assistant;
-}
-
-export function updateAssistantSettings(patch: Partial<AssistantSettings>): AssistantSettings {
-  const clean = Object.fromEntries(Object.entries(patch).filter(([k]) => k in defaultAssistantSettings())) as Partial<AssistantSettings>;
-  db.saveSettings(Object.fromEntries(Object.entries(clean).map(([k, v]) => [`${ASSISTANT_PREFIX}${k}`, v])));
-  assistant = { ...assistant, ...clean };
-  emit({ type: 'assistant_settings', settings: assistant });
-  return assistant;
 }

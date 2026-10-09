@@ -3,7 +3,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { AgentName } from './AgentName.tsx';
 import { DiffView } from './DiffView.tsx';
 import { Markdown } from './Markdown.tsx';
-import { AGENT_JOBS, agentLabel, agentProfile } from '../agents.ts';
+import { JOB_CONTEXT, useAgent, useAgentLabel } from '../agents.ts';
+import { AGENT_JOBS, JOB_LABELS } from '../../../server/types.ts';
 import { teamMessages } from '../activity.ts';
 import type { LogEntry, LogLevel, Subtask } from '../../../server/types.ts';
 
@@ -24,7 +25,8 @@ export function LogView({ logs, subtasks = [], initial = 'summary', showActors =
   const messages = useMemo(() => teamMessages(logs), [logs]);
   const shown = logs.filter((l) => l.level === level && (actor === 'all' || l.actor === actor));
   const assignedTask = (actorId: string, subtaskId?: number | null) => subtasks.find((s) => subtaskId != null ? s.id === subtaskId : s.worker === actorId);
-  const label = (actorId: string, subtaskId?: number | null) => agentLabel(actorId, assignedTask(actorId, subtaskId));
+  const agentLabel = useAgentLabel();
+  const label = (actorId: string, subtaskId?: number | null, profileId?: number | null) => agentLabel(actorId, { subtask: assignedTask(actorId, subtaskId), profileId });
   const chat = messages.filter((m) => actor === 'all' || m.entry.actor === actor);
 
   useEffect(() => {
@@ -50,9 +52,9 @@ export function LogView({ logs, subtasks = [], initial = 'summary', showActors =
         )}
       </div>
       {showActors && <details className="agent-profiles">
-        <summary>About the example agent profiles</summary>
-        <p className="muted small">Names identify example agent profiles. Job titles describe the assigned task; messages come from the recorded agent activity.</p>
-        <dl>{AGENT_JOBS.map((job) => <div key={job.title}><dt>{job.title}</dt><dd>{job.context}</dd></div>)}</dl>
+        <summary>About the agent jobs</summary>
+        <p className="muted small">Names identify agent profiles, which you can edit on the Agents page. Job titles describe what each profile does; messages come from the recorded agent activity.</p>
+        <dl>{AGENT_JOBS.map((job) => <div key={job}><dt>{JOB_LABELS[job]}</dt><dd>{JOB_CONTEXT[job]}</dd></div>)}</dl>
       </details>}
       <div className={`logview-body lv-${level}`} ref={scroller} onScroll={(e) => {
         const el = e.currentTarget;
@@ -60,15 +62,15 @@ export function LogView({ logs, subtasks = [], initial = 'summary', showActors =
       }}>
         {!(level === 'summary' ? chat.length : shown.length) && <p className="muted small pad">Nothing logged yet.</p>}
         {level === 'summary' ? chat.map(({ entry, details }) => (
-          <article key={entry.id} className={`team-bubble ${entry.actor === 'coordinator' ? 'team-coordinator' : 'team-agent'}`} aria-label={label(entry.actor, entry.subtaskId)}>
+          <article key={entry.id} className={`team-bubble ${entry.actor === 'coordinator' ? 'team-coordinator' : 'team-agent'}`} aria-label={label(entry.actor, entry.subtaskId, entry.profileId)}>
             <div className="log-meta">
-              <AgentName actor={entry.actor} subtask={assignedTask(entry.actor, entry.subtaskId)} />
+              <AgentName actor={entry.actor} subtask={assignedTask(entry.actor, entry.subtaskId)} profileId={entry.profileId} avatar />
               <span className="log-time">{time(entry.ts)}</span>
             </div>
             <Markdown source={entry.level === 'detail' ? entry.text.split('\n')[0] : entry.text} />
             {details.length > 0 && <details className="team-details">
               <summary>View details ({details.length})</summary>
-              <p className="profile-context muted small">{agentProfile(entry.actor, assignedTask(entry.actor, entry.subtaskId)).context}</p>
+              <ProfileContext actor={entry.actor} subtask={assignedTask(entry.actor, entry.subtaskId)} profileId={entry.profileId} />
               {details.map((d) => (
                 <div key={d.id} className="team-detail">
                   <span className="log-time">{time(d.ts)}</span>
@@ -80,13 +82,13 @@ export function LogView({ logs, subtasks = [], initial = 'summary', showActors =
         )) : shown.map((l) => level === 'oneliner' ? (
           <div key={l.id} className="log-line">
             <span className="log-time">{time(l.ts)}</span>
-            {showActors && <AgentName actor={l.actor} subtask={assignedTask(l.actor, l.subtaskId)} as="span" className="actor" />}
+            {showActors && <AgentName actor={l.actor} subtask={assignedTask(l.actor, l.subtaskId)} profileId={l.profileId} as="span" className="actor" />}
             <span className="log-text">{l.text}</span>
           </div>
         ) : (
           <div key={l.id} className="log-block">
             <div className="log-meta">
-              {showActors && <AgentName actor={l.actor} subtask={assignedTask(l.actor, l.subtaskId)} as="span" className="actor" />}
+              {showActors && <AgentName actor={l.actor} subtask={assignedTask(l.actor, l.subtaskId)} profileId={l.profileId} as="span" className="actor" />}
               <span className="log-time">{time(l.ts)}</span>
             </div>
             <DiffView diff={l.text} />
@@ -95,4 +97,9 @@ export function LogView({ logs, subtasks = [], initial = 'summary', showActors =
       </div>
     </div>
   );
+}
+
+/** What the agent behind a message sees and was assigned. */
+function ProfileContext({ actor, subtask, profileId }: { actor: string; subtask?: Subtask; profileId: number | null }) {
+  return <p className="profile-context muted small">{useAgent(actor, { subtask, profileId }).context}</p>;
 }

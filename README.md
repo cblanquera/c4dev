@@ -24,10 +24,10 @@ On first launch the factory uses the **Simulated** driver against a demo repo it
 
 To put real agents on your own project, press **New project** on the home screen (or open **⚙ Settings** on a board) and:
 
-1. Set a **Name**, the **Repository path** of your git repo, and its **Base branch**. Each project needs its own repository.
+1. Set a **Name**, the **Project path** of your git repo (type it or use **Choose…**), and its **Base branch**. Each project needs its own repository.
 2. Set the **Test**, **Coverage** and **Acceptance** commands for that project (see [Quality gates](#quality-gates)).
 3. Optionally set a **Worktree setup command** (e.g. `npm ci`). Each worktree is a fresh checkout.
-4. Switch **Driver** to **Claude Agent SDK**. It uses your Claude Code login or `ANTHROPIC_API_KEY`.
+4. Choose what runs each agent in **Settings → Agents**: its **Provider** (Claude, which uses your Claude Code login or `ANTHROPIC_API_KEY`, or **Codex**, **OpenCode** or **Pi**) and **Model**. Settings → Providers shows which agent CLIs are installed and switches them on or off. They use their own logins and keep the planner and architect read-only (see CONTEXT.md). Skills load only on Claude.
 
 > ⚠️ Claude workers run with permission checks bypassed **inside their worktree**, so they can edit files and run your tests unattended. Only point the factory at repositories and tasks you trust. The planner, auditor and instruction writer are read-only.
 
@@ -38,7 +38,7 @@ To put real agents on your own project, press **New project** on the home screen
 | **Icebox** | You | Write the task in markdown. Type `#` to reference other cards; paste, drop or attach images. Press **Generate instructions** to see how the agents read it. If they misread it, improve the description and regenerate until you agree. Saving keeps both texts and parks the card here. Agents never start Icebox cards. |
 | **Backlog** | You → coordinator | Drag cards in. Order is priority, top first. Cards can't be edited here, but can be dragged back (or aborted). When there is capacity, the coordinator takes the top card. It skips cards that reference a card still in flight, to avoid conflicting edits. It then creates the card worktree, splits the task into measurable subtasks with dependencies, and moves the card to the top of In Progress. |
 | **In Progress** | Workers | Each subtask runs in its own worktree, branched from the card's worktree. Subtasks run in parallel once their dependencies are done, up to the worker limit. Workers log constantly. When a worker finishes, the coordinator commits its work and merges it into the card branch. A merge conflict becomes a *merge* subtask, and a failed subtask is retried once. |
-| **Verification** | Coordinator + senior | Runs the tests, then coverage (target 90%, minimum 80% by default), then one senior audit pass per configured focus: complexity, structure, docs and best practices. Failing tests, low coverage, or "must"/"should" findings create fix subtasks and send the card back to In Progress. Nits are logged but don't block. |
+| **Verification** | Coordinator + architect | Runs the tests, then coverage (target 90%, minimum 80% by default), then one architect review pass per configured focus: complexity, structure, docs and best practices. Failing tests, low coverage, or "must"/"should" findings create fix subtasks and send the card back to In Progress. Nits are logged but don't block. |
 | **Acceptance** | Worker + coordinator | A worker writes acceptance scripts under `acceptance/card-<id>/<journey>/<use-case>`, covering visual checks and a mobile viewport. The coordinator then runs your acceptance command. Failures send the card back to In Progress. On a pass, the coordinator decides whether a human must look: Deliverables if so, Complete otherwise. |
 | **Deliverables** | You ⇄ coordinator | Cards waiting on you: **approval**, **input** (a credential, permission or decision a worker asked for), or **help** (repeated failures or errors). Reply in the thread and the coordinator answers, pushing back on unclear or risky input. Secrets you add are injected as environment variables and never shown again. Use **Approve**, **Request changes** or **Resume**. |
 | **Complete** | — | Done. Visible for 7 days (configurable) or until hidden. **Follow-up card** opens a new card that references this one. With *Merge into base branch* on, the card branch is merged, but only if your main checkout is on the base branch and clean. |
@@ -61,11 +61,28 @@ The home screen's assistant (shown as *Ada Lovelace · Chief of Staff*) is the o
 
 It also tells you when a card completes, when a project has nothing left in flight, and when a card needs your approval, input or help. Cards it mentions appear as previews. Click one to open it over the chat, then **Open board** to jump to its board. Never paste credentials into the chat; open the card and use its **Secret** field. The assistant's driver and model are set with **⚙** on the home screen. The Claude assistant reads boards through one read-only tool and has no repository access.
 
+## Agents and teams
+
+Open **Settings → Agents** (the gear on the home screen opens the Settings page) to see every agent profile, grouped as Coordinators, Workers, Auditors, Architects and Chiefs of Staff, with its picture, title, skills, projects and token usage. Edit one to change its name, picture, role, job title (shown beside the name; empty shows the role), model (empty uses the project's), its **Context** (a brief added to every run it does) and its **Skills**, chosen from the library. Design work goes to workers whose job title mentions design.
+
+**Settings → Skills** is the library; **Add skills** imports every SKILL.md in a folder you pick (with the files beside each one), a GitHub repository (a single-skill repo, or one with a `skills/` folder; `/tree/<branch>/<path>` links work too), or a [skills.sh](https://skills.sh) entry by its link or `owner/repo/skill`. Importing a skill again updates it. Private repositories use this machine's git login. Deleted agents are archived so past activity keeps their names.
+
+In a project's **Settings → Team**, choose which agents work there; none chosen means everyone. Each agent's tokens and estimated cost in that project are shown beside it, and every card's Overview shows its own usage.
+
+## Merge, pull and push cards
+
+Merging, pulling and pushing are cards the factory queues straight into the Backlog. They have a dashed tile and a Merge, Pull or Push badge, and the board's type filter shows or hides each kind.
+
+- **Merge into main** on a completed card queues a merge card; the finished card stays in Complete.
+- **Pull** and **Push** appear on a board when the repository has the configured remote (Settings → Project → Remote, `origin` by default). A merge also queues a push.
+
+Each card lands right away when nothing new needs merging. Otherwise it merges the new commits in a worktree, a worker resolves conflicts, the tests (and for merges the card's acceptance scripts) run, and only then does the base branch move. Pushes never force. Git uses this machine's credentials and fails rather than prompting.
+
 ## Logs
 
 Every subtask records activity, shown in three views:
 
-- **Team Chat**: summaries in named agent bubbles, with coordinator messages on the right and workers and senior auditors on the left. Expand a message to see recorded reasoning, test output, and audit findings. Detail-only output is preserved.
+- **Team Chat**: summaries in named agent bubbles, with coordinator messages on the right and workers and architects on the left. Expand a message to see recorded reasoning, test output, and audit findings. Detail-only output is preserved.
 - **Logs**: a live activity feed. Real agents report through a `log_activity` tool and each tool call is captured, e.g. `Edited src/cart.ts` or `$ npm test`.
 - **Diffs**: the subtask's exact changes since it forked, split per file.
 
@@ -75,9 +92,9 @@ The card's **Activity** tab defaults to **Team Chat**, followed by **Logs** and 
 |---|---|
 | **Coordinator** | The current card, plan, dependencies, and repository; assigns tasks, tracks progress, and prepares handoffs. |
 | **Designer** | An explicitly titled design, wireframe, mockup, or prototype task and its isolated worktree; reports layout and interaction decisions. |
-| **Developer** | An implementation, fix, or merge task and its isolated worktree; reports code changes and blockers. |
+| **Worker** | An implementation, fix, or merge task and its isolated worktree; reports code changes and blockers. |
 | **Auditor** | A test task or acceptance-script subtask and its isolated worktree; reports scenarios, scripts, and findings. Recorded results establish what actually ran. |
-| **Senior Developer** | The combined card worktree and current audit lens; reviews code and recommendations with read-only access. |
+| **Architect** | The combined card worktree and current review lens; reviews code and recommendations with read-only access. |
 
 Job titles are display classifications of existing assignments. Designer and Auditor profiles use the existing worker driver and its subtask permissions; they do not introduce new driver roles. Each expanded Team Chat message shows its context and assigned task. **About the example agent profiles** explains all five jobs in the UI.
 

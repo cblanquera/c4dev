@@ -1,10 +1,14 @@
-/** Project configuration (target repo, agents, quality gates) and the assistant's own driver. */
+/** Project configuration: target repo, agents, team and quality gates. */
 import { Icon } from './Icon.tsx';
-import { useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useEffect, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { api } from '../api.ts';
-import type { AssistantSettings, Project, Settings } from '../../../server/types.ts';
+import { Avatar } from './Avatar.tsx';
+import { usageLine } from '../format.ts';
+import { ROLE_GROUPS, profileTitle } from '../agents.ts';
+import { FolderPicker } from './FolderPicker.tsx';
+import type { AgentProfile, Project, Settings, UsageTotals } from '../../../server/types.ts';
 
-function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
     <label className="field">
       <span className="field-label">{label}</span>
@@ -14,10 +18,10 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   );
 }
 
-type Section = 'project' | 'agents' | 'quality';
+type Section = 'project' | 'team' | 'quality';
 const SECTIONS: { id: Section; label: string }[] = [
   { id: 'project', label: 'Project' },
-  { id: 'agents', label: 'Agents' },
+  { id: 'team', label: 'Team' },
   { id: 'quality', label: 'Quality gates' },
 ];
 
@@ -25,18 +29,30 @@ interface Props {
   /** null creates a new project from `defaults`. */
   project: Project | null;
   defaults: Settings;
+  /** Profiles to choose the team from. */
+  profiles: AgentProfile[];
   onClose: () => void;
   onSaved: (project: Project) => void;
   onError: (m: string) => void;
 }
 
-export function SettingsDialog({ project, defaults, onClose, onSaved, onError }: Props) {
+export function SettingsDialog({ project, defaults, profiles, onClose, onSaved, onError }: Props) {
   const [name, setName] = useState(project?.name ?? '');
   // A new project needs its own repository; the demo default would collide.
   const [draft, setDraft] = useState<Settings>(project?.settings ?? { ...defaults, repoPath: '' });
   const [saving, setSaving] = useState(false);
   const [section, setSection] = useState<Section>('project');
+  const [picking, setPicking] = useState(false);
   const missing = !name.trim() || !draft.repoPath.trim();
+  const [teamUsage, setTeamUsage] = useState<Record<number, UsageTotals>>({});
+  useEffect(() => {
+    if (!project) return;
+    let live = true;
+    api.projectUsage(project.id).then((u) => live && setTeamUsage(u.byProfile)).catch(() => {});
+    return () => { live = false; };
+  }, [project?.id]);
+  const workers = profiles.filter((p) => !p.archived && p.job !== 'assistant');
+  const everyone = !draft.team.length;
   const set = <K extends keyof Settings>(key: K, value: Settings[K]) => setDraft((d) => ({ ...d, [key]: value }));
   const num = (key: keyof Settings) => ({
     type: 'number' as const,
@@ -52,7 +68,7 @@ export function SettingsDialog({ project, defaults, onClose, onSaved, onError }:
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Save failed';
       // Name and repository problems are fixed in the Project section.
-      if (/name|repositor/i.test(message)) setSection('project');
+      if (/name|repositor|path/i.test(message)) setSection('project');
       onError(message);
     } finally {
       setSaving(false);
@@ -89,9 +105,14 @@ export function SettingsDialog({ project, defaults, onClose, onSaved, onError }:
               <Field label="Name">
                 <input value={name} onChange={(e) => setName(e.target.value)} autoFocus={!project} />
               </Field>
-              <Field label="Repository path" hint="Absolute path to the git repo the agents work on. Worktrees are created next to the factory data, not inside it.">
-                <input className="mono" value={draft.repoPath} onChange={(e) => set('repoPath', e.target.value)} />
-              </Field>
+              <div className="field">
+                <label className="field-label" htmlFor="project-path">Project path</label>
+                <div className="path-row">
+                  <input id="project-path" className="mono" aria-describedby="project-path-hint" value={draft.repoPath} onChange={(e) => set('repoPath', e.target.value)} />
+                  <button type="button" className="secondary" onClick={() => setPicking(true)}>Choose…</button>
+                </div>
+                <span className="field-hint" id="project-path-hint">The project's git repository. Worktrees are created next to the factory data, not inside it.</span>
+              </div>
               <div className="grid2">
                 <Field label="Base branch"><input className="mono" value={draft.baseBranch} onChange={(e) => set('baseBranch', e.target.value)} /></Field>
                 <Field label="When complete">
@@ -101,28 +122,46 @@ export function SettingsDialog({ project, defaults, onClose, onSaved, onError }:
                   </select>
                 </Field>
               </div>
-              <Field label="Worktree setup command" hint="Runs in every new worktree, e.g. npm ci">
+              <Field label="Remote" hint={project?.remoteUrl ? `Pull and Push use ${project.remoteUrl}, with this machine's git credentials.` : 'The git remote to pull from and push to, e.g. origin. Pull and Push appear when the repository has it.'}>
+              <input className="mono" value={draft.remote} onChange={(e) => set('remote', e.target.value)} />
+            </Field>
+            <Field label="Worktree setup command" hint="Runs in every new worktree, e.g. npm ci">
                 <input className="mono" value={draft.setupCommand} onChange={(e) => set('setupCommand', e.target.value)} />
               </Field>
             </fieldset>}
 
-            {section === 'agents' && <fieldset>
-              <legend>Agents</legend>
-              <Field label="Driver" hint={draft.driver === 'simulated' ? 'Simulated agents write harmless notes instead of code. No API calls, no cost.' : 'Real Claude agents via the Claude Agent SDK. Workers can edit files and run commands inside their worktrees.'}>
-                <select value={draft.driver} onChange={(e) => set('driver', e.target.value as Settings['driver'])}>
-                  <option value="simulated">Simulated (demo)</option>
-                  <option value="claude">Claude Agent SDK</option>
-                </select>
-              </Field>
-              <div className="grid2">
-                <Field label="Coordinator & worker model"><input className="mono" value={draft.model} onChange={(e) => set('model', e.target.value)} /></Field>
-                <Field label="Senior auditor model"><input className="mono" value={draft.seniorModel} onChange={(e) => set('seniorModel', e.target.value)} /></Field>
-                <Field label="Cards in flight" hint="Max cards past the Backlog at once"><input min={1} max={20} {...num('maxActiveCards')} /></Field>
-                <Field label="Workers" hint="Max concurrent worker agents"><input min={1} max={32} {...num('maxWorkers')} /></Field>
-              </div>
-            </fieldset>}
+            {section === 'team' && <fieldset>
+            <legend>Team</legend>
+            <div className="grid2">
+              <Field label="Cards in flight" hint="Max cards past the Backlog at once"><input min={1} max={20} {...num('maxActiveCards')} /></Field>
+              <Field label="Workers" hint="Max concurrent worker agents"><input min={1} max={32} {...num('maxWorkers')} /></Field>
+            </div>
+            <p className="field-hint">
+              {everyone ? 'Every agent can work on this project. Choose agents to limit who does, and who spends tokens here.' : 'Only the chosen agents work on this project.'}
+              {' '}Without a designer or auditor, developers take that work.
+            </p>
+            {ROLE_GROUPS.map(({ label, jobs }) => {
+              const list = workers.filter((p) => jobs.includes(p.job));
+              if (!list.length) return null;
+              return (
+                <div key={label} className="team-group" role="group" aria-label={label}>
+                  <span className="field-label">{label}</span>
+                  {list.map((p) => (
+                    <label key={p.id} className="team-option">
+                      <input type="checkbox" checked={draft.team.includes(p.id)}
+                        onChange={(e) => set('team', e.target.checked ? [...draft.team, p.id] : draft.team.filter((id) => id !== p.id))} />
+                      <Avatar name={p.name} imageUrl={p.imageUrl} size={24} />
+                      <span className="team-option-name">{p.name}<span className="muted small"> · {profileTitle(p)}{p.model ? ` · ${p.model}` : ''}</span></span>
+                      {project && teamUsage[p.id] && <span className="muted small">{usageLine(teamUsage[p.id])}</span>}
+                    </label>
+                  ))}
+                </div>
+              );
+            })}
+            {!everyone && <button className="link small" onClick={() => set('team', [])}>Let every agent work here</button>}
+          </fieldset>}
 
-            {section === 'quality' && <fieldset>
+          {section === 'quality' && <fieldset>
               <legend>Quality gates</legend>
               <Field label="Test command"><input className="mono" value={draft.testCommand} onChange={(e) => set('testCommand', e.target.value)} /></Field>
               <Field label="Coverage command" hint="Must print a coverage table (istanbul, c8, node --test, pytest-cov, go) or write coverage/coverage-summary.json. Leave empty to skip.">
@@ -135,7 +174,7 @@ export function SettingsDialog({ project, defaults, onClose, onSaved, onError }:
               <Field label="Acceptance command" hint="{card} expands to the card id, e.g. npx playwright test acceptance/card-{card}">
                 <input className="mono" value={draft.acceptanceCommand} onChange={(e) => set('acceptanceCommand', e.target.value)} />
               </Field>
-              <Field label="Senior audit passes" hint="One focus per line. Each line is a separate audit pass.">
+              <Field label="Architect review passes" hint="One focus per line. Each line is a separate review pass.">
                 <textarea rows={4} value={draft.auditLenses.join('\n')} onChange={(e) => set('auditLenses', e.target.value.split('\n'))} />
               </Field>
               <div className="grid2">
@@ -146,55 +185,11 @@ export function SettingsDialog({ project, defaults, onClose, onSaved, onError }:
           </div>
         </div>
         <footer className="modal-foot">
-          {missing && <span className="muted small">Name and repository path are required (Project).</span>}
+          {missing && <span className="muted small">Name and project path are required (Project).</span>}
           <button className="secondary" onClick={onClose}>Cancel</button>
           <button className="primary" disabled={saving || missing} onClick={save}>{project ? 'Save settings' : 'Create project'}</button>
         </footer>
-      </div>
-    </div>
-  );
-}
-
-/** The assistant answers for every project, so its driver is set separately from theirs. */
-export function AssistantSettingsDialog({ settings, onClose, onError }: { settings: AssistantSettings; onClose: () => void; onError: (m: string) => void }) {
-  const [draft, setDraft] = useState(settings);
-  const [saving, setSaving] = useState(false);
-
-  async function save() {
-    setSaving(true);
-    try {
-      await api.assistantSettings(draft);
-      onClose();
-    } catch (err) {
-      onError(err instanceof Error ? err.message : 'Save failed');
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="assistant-settings-title">
-        <header className="modal-head">
-          <h2 id="assistant-settings-title">Assistant settings</h2>
-          <button className="ghost" onClick={onClose} aria-label="Close"><Icon name="x" /></button>
-        </header>
-        <div className="modal-body">
-          <fieldset>
-            <legend>Agent</legend>
-            <Field label="Driver" hint={draft.driver === 'simulated' ? 'Answers fixed phrasings. No API calls, no cost.' : 'A Claude agent that reads every board. It has no repository or file access.'}>
-              <select value={draft.driver} onChange={(e) => setDraft((d) => ({ ...d, driver: e.target.value as AssistantSettings['driver'] }))}>
-                <option value="simulated">Simulated (demo)</option>
-                <option value="claude">Claude Agent SDK</option>
-              </select>
-            </Field>
-            <Field label="Model"><input className="mono" value={draft.model} onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))} /></Field>
-          </fieldset>
-        </div>
-        <footer className="modal-foot">
-          <button className="secondary" onClick={onClose}>Cancel</button>
-          <button className="primary" disabled={saving || !draft.model.trim()} onClick={save}>Save settings</button>
-        </footer>
+        {picking && <FolderPicker start={draft.repoPath} onClose={() => setPicking(false)} onChoose={(path) => { set('repoPath', path); setPicking(false); }} />}
       </div>
     </div>
   );

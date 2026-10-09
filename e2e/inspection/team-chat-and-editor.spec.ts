@@ -8,7 +8,7 @@ test('named team bubbles preserve details, and the Markdown composer stays below
   const state = await (await request.get('/api/state')).json();
   const now = Date.now();
   const card: Card = {
-    id: 900010, projectId: 1, title: 'Team conversation fixture', description: 'Review the team conversation.',
+    id: 900010, projectId: 1, kind: 'task', title: 'Team conversation fixture', description: 'Review the team conversation.',
     instructions: 'Inspect the activity.', instructionsHash: 'current', instructionsCurrent: true,
     stage: 'complete', position: 0, status: 'idle', statusText: 'Complete', tags: [], parentId: null,
     branch: 'factory/card-900010', worktree: null, loops: 0, coverage: 100, acceptanceReady: true,
@@ -21,7 +21,7 @@ test('named team bubbles preserve details, and the Markdown composer stays below
     branch: null, worktree: null, summary: '', diff: '', files: [], attempts: 1, startedAt: now, endedAt: now + 10,
   });
   const detail: CardDetail = {
-    card, subtasks: [task(5, 'Implement timezone selector', 'build'), task(6, 'Write acceptance scripts', 'acceptance'), task(2, 'Design timezone selector layout', 'build')], chatBusy: false, deliveryNotes: '# How to review\n\nOpen the local preview.',
+    card, subtasks: [task(5, 'Implement timezone selector', 'build'), task(6, 'Write acceptance scripts', 'acceptance'), task(2, 'Design timezone selector layout', 'build')], chatBusy: false, usage: { runs: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 }, deliveryNotes: '# How to review\n\nOpen the local preview.',
     logs: [
       log(1, 'coordinator', 'summary', 'Please check the timezone handling.'),
       log(2, 'worker-5', 'summary', 'The timezone selector is ready.', 5),
@@ -46,14 +46,14 @@ test('named team bubbles preserve details, and the Markdown composer stays below
   await expect(views.getByRole('tab')).toHaveText(['Team Chat', 'Logs', 'Diffs']);
   await expect(views.getByRole('tab', { name: 'Team Chat', exact: true })).toHaveAttribute('aria-selected', 'true');
   await expect(views.locator('.count')).toHaveCount(0);
-  await page.getByText('About the example agent profiles', { exact: true }).click();
-  await expect(page.locator('.agent-profiles')).toContainText('Names identify example agent profiles');
+  await page.getByText('About the agent jobs', { exact: true }).click();
+  await expect(page.locator('.agent-profiles')).toContainText('Names identify agent profiles');
   await expect(page.locator('.agent-profiles')).toContainText('read-only access');
-  await page.getByText('About the example agent profiles', { exact: true }).click();
+  await page.getByText('About the agent jobs', { exact: true }).click();
   await expect(page.getByRole('tab', { name: /^Details/ })).toHaveCount(0);
   const coordinator = page.getByRole('article', { name: 'Grace Hopper · Coordinator', exact: true });
-  const worker = page.getByRole('article', { name: 'Casey · Developer', exact: true });
-  const senior = page.getByRole('article', { name: 'Linus Torvalds · Senior Developer', exact: true });
+  const worker = page.getByRole('article', { name: 'Casey · Worker', exact: true });
+  const senior = page.getByRole('article', { name: 'Linus Torvalds · Architect', exact: true });
   expect((await coordinator.boundingBox())!.x).toBeGreaterThan((await worker.boundingBox())!.x);
   const paletteKeys = await page.locator('.team-bubble .agent-name').evaluateAll((elements) => elements.map((element) => element.getAttribute('data-agent-color')));
   expect(new Set(paletteKeys).size).toBe(5);

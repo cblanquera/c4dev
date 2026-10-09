@@ -1,12 +1,12 @@
 /** The cross-project assistant conversation: replies, updates, relayed messages and clickable card previews. */
 import { Icon } from './Icon.tsx';
-import { useEffect, useRef, useState } from 'react';
+import { useContext, useEffect, useRef, useState } from 'react';
 import { api } from '../api.ts';
 import { Markdown } from './Markdown.tsx';
 import { MarkdownEditor } from './MarkdownEditor.tsx';
 import { AgentName } from './AgentName.tsx';
 import { CardChip } from './CardChip.tsx';
-import { agentLabel } from '../agents.ts';
+import { DirectoryContext, assistantOf, providerLabel, useAgentLabel } from '../agents.ts';
 import type { AssistantMessage, AssistantState, Card, Project } from '../../../server/types.ts';
 
 interface Props {
@@ -33,6 +33,8 @@ export function AssistantChat({ assistant, cards, cardList, projects, onCardClic
   const end = useRef<HTMLDivElement>(null);
   const { messages, busy } = assistant;
   const blocked = sending || busy;
+  const agentLabel = useAgentLabel();
+  const me = assistantOf(useContext(DirectoryContext).profiles.values());
 
   useEffect(() => {
     // Braces matter: newer browsers return a Promise from scrollIntoView, which React would treat as a cleanup.
@@ -55,8 +57,8 @@ export function AssistantChat({ assistant, cards, cardList, projects, onCardClic
   return (
     <section className="assistant" aria-labelledby="assistant-title">
       <header className="section-bar">
-        <h2 id="assistant-title"><AgentName actor="assistant" /></h2>
-        {assistant.settings.driver === 'simulated' && <span className="badge d-approval" title="Assistant driver (change in Settings)">Simulated</span>}
+        <h2 id="assistant-title"><AgentName actor="assistant" avatar /></h2>
+        {me && <span className={`badge ${me.provider === 'simulated' ? 'd-approval' : 'subtle'}`} title="What the assistant runs on (change in Settings → Assistant)">{providerLabel(me.provider)}</span>}
       </header>
       <div className="assistant-history" role="log" aria-label="Assistant conversation">
         {!messages.length && <p className="muted small">Ask for a status update, draft a card in any project, or answer what a project is waiting on.</p>}

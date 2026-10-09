@@ -95,6 +95,7 @@ async function queueCard(description: string, projectId = DEMO) {
 before(async () => {
   db.openDb(path.join(dataDir, 'factory.db'));
   initSettings();
+  (await import('../server/profiles.ts')).seedProfiles();
   await ensureDemoRepo(repo);
   updateSettings(DEMO, { maxActiveCards: 3, maxWorkers: 3 });
   subscribe((e) => {
@@ -384,12 +385,22 @@ test('the assistant passes on deliverables, relays coordinator replies and resol
   assert.ok(!JSON.stringify(db.listAssistantMessages(500)).includes('sk-billing'));
 });
 
+/** Commits a file on the demo repo's main checkout, moving main. */
+async function commitOnMain(file: string, content: string) {
+  fs.mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
+  fs.writeFileSync(path.join(repo, file), content);
+  await git(repo, 'add', '-A');
+  await git(repo, '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-m', `Change ${file} on main`);
+}
+const notices = (id: number) => db.listAssistantMessages(500).filter((m) => m.kind === 'notification' && m.cardIds[0] === id);
+/** The merge card queued for a finished card. */
+const mergeCardFor = (id: number) => until(() => db.listCards().find((c) => c.kind === 'merge' && c.parentId === id));
+
 test('completed cards record whether their branch reached the base branch', async () => {
   const { isAncestor } = await import('../server/git.ts');
-  const notice = (id: number) => until(() => db.listAssistantMessages(500).find((m) => m.kind === 'notification' && m.cardIds[0] === id));
 
   // Kept by default; a merge made by hand afterwards is noticed.
-  const kept = db.listCards(DEMO).find((c) => c.stage === 'complete' && c.branch && c.mergeState === 'unmerged')!;
+  const kept = db.listCards(DEMO).find((c) => c.kind === 'task' && c.stage === 'complete' && c.branch && c.mergeState === 'unmerged')!;
   assert.equal(kept.mergeNote, `Kept on factory/card-${kept.id}`);
   await git(repo, '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'merge', '--no-ff', '-m', 'Manual merge', `factory/card-${kept.id}`);
   await factory.coordinator(DEMO).refreshMergeStates();
@@ -398,90 +409,314 @@ test('completed cards record whether their branch reached the base branch', asyn
   updateSettings(DEMO, { onComplete: 'merge' });
   const scratch = path.join(repo, 'scratch.txt');
   try {
+    // Projects that merge completed work queue a merge card for it.
     const merged = await queueCard('# Merge me\n\n- merge one\n- merge two');
-    assert.equal((await waitFor(merged, (c) => c.stage === 'complete' && c.worktree === null)).mergeState, 'merged');
+    await waitFor(merged, (c) => c.stage === 'complete' && c.worktree === null);
+    const auto = await mergeCardFor(merged);
+    assert.match(db.listLogs(auto.id).map((l) => l.text).join('\n'), /the project merges completed work automatically/);
+    assert.equal((await waitFor(merged, (c) => c.mergeState === 'merged')).mergeNote, `Merged into main by #${auto.id}`);
     assert.equal(await isAncestor(repo, `factory/card-${merged}`, 'main'), true);
-    assert.match((await notice(merged)).body, /is complete in \*\*Demo project\*\*\. Merged into main\./);
+    assert.match((await until(() => notices(merged).find((m) => /Merged into main/.test(m.body)))).body, new RegExp(`in \\*\\*Demo project\\*\\*: Merged into main by #${auto.id}\\.`));
 
-    // A dirty main checkout is never touched: the branch is kept and the reason recorded.
+    // A dirty main checkout is never touched: the merge card waits for the user, then resumes.
     fs.writeFileSync(scratch, 'work in progress');
     const blocked = await queueCard('# Blocked merge\n\n- block one\n- block two');
-    const card = await waitFor(blocked, (c) => c.stage === 'complete' && c.worktree === null);
-    assert.equal(card.mergeState, 'blocked');
-    assert.equal(card.mergeNote, `Kept on factory/card-${blocked}: main checkout has uncommitted changes`);
-    assert.equal(await isAncestor(repo, `factory/card-${blocked}`, 'main'), false);
-    assert.match((await notice(blocked)).body, /Merge blocked: main checkout has uncommitted changes; the work is on `factory\/card-\d+`\./);
+    await waitFor(blocked, (c) => c.stage === 'complete' && c.worktree === null);
+    const waiting = await waitFor((await mergeCardFor(blocked)).id, (c) => c.stage === 'deliverables');
+    assert.equal(waiting.statusText, "Can't land: main checkout has uncommitted changes");
+    assert.deepEqual([db.getCard(blocked)!.merging, db.getCard(blocked)!.mergeNote], [true, `Merge #${waiting.id} is blocked: main checkout has uncommitted changes`]);
+    assert.match((await until(() => notices(waiting.id).find((m) => /needs your help/.test(m.body)))).body, /uncommitted changes/);
+    fs.rmSync(scratch);
+    assert.equal((await api('POST', `/api/cards/${waiting.id}/resume`, {})).status, 200);
+    assert.equal((await waitFor(blocked, (c) => c.mergeState === 'merged')).merging, false);
   } finally {
     fs.rmSync(scratch, { force: true });
     updateSettings(DEMO, { onComplete: 'keep' });
   }
 });
 
-test('merging a completed card lands verified code, re-verifying it when main has moved', async () => {
+test('merge cards land verified code, re-verifying it when main has moved', async () => {
   const { isAncestor } = await import('../server/git.ts');
-  const commitOnMain = async (file: string, content: string) => {
-    fs.mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
-    fs.writeFileSync(path.join(repo, file), content);
-    await git(repo, 'add', '-A');
-    await git(repo, '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-m', `Change ${file} on main`);
-  };
-  const notices = (id: number) => db.listAssistantMessages(500).filter((m) => m.kind === 'notification' && m.cardIds[0] === id);
-  const landed = (id: number) => waitFor(id, (c) => c.stage === 'complete' && !c.merging && c.worktree === null && c.mergeState !== 'unmerged');
+  const landed = (id: number) => waitFor(id, (c) => c.mergeState === 'merged' && !c.merging);
 
-  // main hasn't moved since the card branched: it lands without leaving Complete.
+  // main hasn't moved since the card branched: the merge card lands straight from the Backlog.
   const fast = await queueCard('# Fast merge\n\n- fast one\n- fast two');
   await waitFor(fast, (c) => c.stage === 'complete' && c.worktree === null);
-  const stagesBefore = stagesSeen.get(fast)!.length;
-  assert.equal((await api('POST', `/api/cards/${fast}/merge`)).status, 200);
-  assert.equal((await landed(fast)).mergeState, 'merged');
-  assert.equal(stagesSeen.get(fast)!.length, stagesBefore);
+  const sourceStages = stagesSeen.get(fast)!.length;
+  const queued = await api('POST', `/api/cards/${fast}/merge`);
+  assert.equal(queued.status, 200, queued.raw);
+  assert.deepEqual([queued.body.kind, queued.body.parentId, queued.body.branch], ['merge', fast, `factory/card-${fast}`]);
+  await landed(fast);
+  assert.equal(stagesSeen.get(fast)!.length, sourceStages, 'the finished card stays in Complete');
+  assert.deepEqual(stagesSeen.get(queued.body.id), ['backlog', 'complete']);
   assert.equal(await isAncestor(repo, `factory/card-${fast}`, 'main'), true);
   assert.equal((await api('POST', `/api/cards/${fast}/merge`)).status, 409);
-  assert.match((await until(() => notices(fast).find((m) => /Merged into main/.test(m.body)))).body, /in \*\*Demo project\*\*: Merged into main\./);
+  assert.equal((await api('POST', `/api/cards/${queued.body.id}/move`, { stage: 'icebox' })).status, 409);
 
-  // main moved and conflicts: a worker resolves it, then the card is verified again before main moves.
+  // main moved and conflicts: a worker resolves it on the merge card, which is verified before main moves.
   const clash = await queueCard('# Conflicting merge\n\n- clash one\n- clash two');
   await waitFor(clash, (c) => c.stage === 'complete' && c.worktree === null);
   const file = db.listSubtasks(clash).flatMap((s) => s.files).find((f) => f.path.startsWith('factory-sim/'))!.path;
   const cardVersion = await git(repo, 'show', `factory/card-${clash}:${file}`);
   await commitOnMain(file, 'the main branch version\n');
-  const seen = stagesSeen.get(clash)!.length;
   await ask(`merge #${clash}`, (messages) => messages.some((m) => m.kind === 'action'));
-  const merged = await landed(clash);
-  assert.equal(merged.mergeState, 'merged', merged.mergeNote);
-  assert.deepEqual(stagesSeen.get(clash)!.slice(seen), ['in_progress', 'verification', 'acceptance', 'complete']);
-  const resolution = db.listSubtasks(clash).find((s) => s.kind === 'merge')!;
+  const merge = await mergeCardFor(clash);
+  await landed(clash);
+  assert.deepEqual(stagesSeen.get(merge.id), ['backlog', 'in_progress', 'verification', 'acceptance', 'complete']);
+  const resolution = db.listSubtasks(merge.id).find((s) => s.kind === 'merge')!;
   assert.deepEqual([resolution.title, resolution.status], ['Resolve conflicts with main', 'done']);
   assert.equal(await git(repo, 'show', `main:${file}`), cardVersion);
-  assert.equal(await isAncestor(repo, `factory/card-${clash}`, 'main'), true);
+  assert.equal(db.getCard(clash)!.mergeNote, `Merged into main by #${merge.id}`);
   await until(() => notices(clash).find((m) => /Merged into main/.test(m.body)));
-  assert.equal(notices(clash).filter((m) => /is complete/.test(m.body)).length, 1, 'the merge pass reports once, when it lands');
+  assert.equal(notices(merge.id).length, 0, 'a merge card reports on the card it merged');
 
   // The merge can be audited: who asked, every stage change with its reason, and each git command with its SHAs.
-  const trail = db.listLogs(clash).filter((l) => l.actor === 'coordinator' && l.level === 'summary').map((l) => l.text);
+  const trail = db.listLogs(merge.id).filter((l) => l.actor === 'coordinator' && l.level === 'summary').map((l) => l.text);
   const has = (re: RegExp) => assert.ok(trail.some((t) => re.test(t)), `${re}\n${trail.join('\n')}`);
-  has(/^You asked to merge factory\/card-\d+ into main, through the assistant\.$/);
-  has(/^main has moved since factory\/card-\d+ was verified/);
-  has(/^\*\*Complete → In Progress\*\*: main conflicts with factory\/card-\d+ in `factory-sim\/[^`]+` \(merge attempt 1\/5\); a worker resolves them$/);
+  has(new RegExp(`^Queued to merge #${clash} \\(factory/card-${clash}\\) into main: you asked, through the assistant\\.$`));
+  has(/^main has moved since factory\/card-\d+ was verified, so it is merged in/);
+  has(/^\*\*Backlog → In Progress\*\*: main conflicts with factory\/card-\d+ in `factory-sim\/[^`]+` \(attempt 1\/5\); a worker resolves them$/);
   has(/^\*\*In Progress → Verification\*\*: all subtasks merged into the card branch$/);
-  has(/^\*\*Acceptance → Complete\*\*: the update from main passed verification and acceptance$/);
+  has(/^\*\*Verification → Acceptance\*\*: tests passed$/);
+  has(/^\*\*Acceptance → Complete\*\*: merged into main$/);
   has(/^Merged factory\/card-\d+ into main\./);
-  const details = db.listLogs(clash).filter((l) => l.level === 'detail').map((l) => l.text).join('\n');
-  assert.match(details, /\$ git merge-base --is-ancestor main factory\/card-\d+ {2}# main at \w{7} is not in factory\/card-\d+ at \w{7}/);
+  const details = db.listLogs(merge.id).filter((l) => l.level === 'detail').map((l) => l.text).join('\n');
+  assert.match(details, /\$ git merge-base --is-ancestor main factory\/card-\d+ {2}# main is not in factory\/card-\d+/);
   assert.match(details, /\$ git merge --no-ff main\n[\s\S]*CONFLICT[\s\S]*\$ git merge --abort/);
   assert.match(details, /# main: \w{7} → \w{7}/);
+  assert.match(db.listLogs(clash).map((l) => l.text).join('\n'), new RegExp(`Queued #${merge.id} to merge`));
 
-  // Cancelling a merge pass returns the card to Complete with its branch kept, not archived.
+  // Cancelling a merge card leaves the finished card complete, on its branch, not archived.
   const stop = await queueCard('# Cancelled merge\n\n- stop one\n- stop two');
   await waitFor(stop, (c) => c.stage === 'complete' && c.worktree === null);
   await commitOnMain(`notes/moved-${stop}.md`, 'main moves on\n');
-  await api('POST', `/api/cards/${stop}/merge`);
-  await waitFor(stop, (c) => ['in_progress', 'verification', 'acceptance'].includes(c.stage));
-  const cancelled = (await api('POST', `/api/cards/${stop}/abort`)).body;
-  assert.deepEqual([cancelled.stage, cancelled.merging, cancelled.mergeState, cancelled.branch], ['complete', false, 'unmerged', `factory/card-${stop}`]);
-  assert.match(cancelled.mergeNote, /^Merge cancelled/);
+  const cancelMe = (await api('POST', `/api/cards/${stop}/merge`)).body;
+  await waitFor(cancelMe.id, (c) => ['in_progress', 'verification', 'acceptance'].includes(c.stage));
+  const cancelled = (await api('POST', `/api/cards/${cancelMe.id}/abort`)).body;
+  assert.deepEqual([cancelled.stage, cancelled.statusText], ['complete', 'Cancelled']);
+  const source = db.getCard(stop)!;
+  assert.deepEqual([source.merging, source.mergeState, source.mergeNote], [false, 'unmerged', `Merge #${cancelMe.id} cancelled; kept on factory/card-${stop}`]);
   assert.match(await git(repo, 'branch', '--list', `factory/card-${stop}`), /card/);
   assert.match((await until(() => notices(stop).find((m) => /cancelled/.test(m.body)))).body, /work stays on `factory\/card-\d+`/);
+});
+
+test('agent profiles carry briefs and skills, teams decide who works where, and usage is recorded', async () => {
+  const state = (await api('GET', '/api/state')).body;
+  const byName = (name: string) => state.profiles.find((p: any) => p.name === name);
+  assert.deepEqual(state.profiles.map((p: any) => p.name), ['Grace Hopper', 'Linus Torvalds', 'Alex', 'Jamie', 'Sam', 'Casey', 'Riley', 'Ada Lovelace']);
+
+  const SKILL = '---\nname: release-notes\ndescription: Write release notes for every change.\n---\n# Release notes\n\nList user-facing changes.';
+  const skill = await api('POST', '/api/skills', { content: SKILL });
+  assert.equal(skill.status, 201, skill.raw);
+  assert.equal(skill.body.description, 'Write release notes for every change.');
+  assert.equal((await api('POST', '/api/skills', { content: SKILL })).status, 409);
+  assert.equal((await api('POST', '/api/skills', { content: '# no frontmatter' })).status, 400);
+  assert.equal((await api('GET', `/api/skills/${skill.body.id}`)).body.content, SKILL);
+
+  // Unknown skills and images from elsewhere are dropped.
+  const created = await api('POST', '/api/profiles', {
+    name: 'Margaret Hamilton', job: 'developer', title: '  Flight Software Engineer ', context: 'Write defensive code.',
+    skillIds: [skill.body.id, 9999], imageUrl: 'https://evil.example/x.png',
+  });
+  assert.equal(created.status, 201, created.raw);
+  const margaret = created.body;
+  assert.deepEqual([margaret.skillIds, margaret.imageUrl, margaret.title], [[skill.body.id], null, 'Flight Software Engineer']);
+  assert.equal(byName('Alex').title, '', 'default titles show the role');
+  assert.deepEqual([byName('Casey').job, byName('Casey').title], ['developer', 'Designer']);
+  const plugin = path.join(dataDir, 'profiles', String(margaret.id));
+  assert.equal(fs.readFileSync(path.join(plugin, 'skills', 'release-notes', 'SKILL.md'), 'utf8'), SKILL);
+  assert.match(fs.readFileSync(path.join(plugin, '.claude-plugin', 'plugin.json'), 'utf8'), /factory-profile-/);
+
+  // Shop's team: Grace coordinates, Linus reviews, Margaret and Casey (titled Designer) work; there's no auditor.
+  const team = [byName('Grace Hopper').id, byName('Linus Torvalds').id, margaret.id, byName('Casey').id];
+  assert.equal((await api('PATCH', `/api/projects/${shop}`, { settings: { team: [...team, 9999] } })).body.settings.team.join(), team.join());
+  const id = await queueCard('# Shop receipts\n\n- design the receipt layout\n- receipt totals', shop);
+  await waitFor(id, (c) => c.stage === 'complete' && c.worktree === null);
+  const subtasks = db.listSubtasks(id);
+  const workers = [margaret.id, byName('Casey').id];
+  assert.ok(subtasks.every((s) => workers.includes(s.profileId!)), JSON.stringify(subtasks.map((s) => s.profileId)));
+  assert.equal(subtasks.find((s) => s.title === 'design the receipt layout')!.profileId, byName('Casey').id, 'design work goes to a worker titled for it');
+  assert.equal(subtasks.find((s) => s.title === 'receipt totals')!.profileId, margaret.id, 'the rest goes to the least busy worker');
+  const logs = db.listLogs(id);
+  assert.ok(logs.some((l) => l.profileId === margaret.id && l.text === 'Using skills: release-notes'));
+  assert.ok(logs.filter((l) => l.actor === 'coordinator').every((l) => l.profileId === byName('Grace Hopper').id || l.profileId === null));
+  assert.ok(logs.filter((l) => l.actor === 'senior').every((l) => l.profileId === byName('Linus Torvalds').id));
+
+  // Every run is charged to its project, card and profile; the assistant's too.
+  const usage = (await api('GET', `/api/cards/${id}`)).body.usage;
+  assert.ok(usage.runs >= subtasks.length && usage.inputTokens > 0 && usage.costUsd === 0, JSON.stringify(usage));
+  const margaretsRuns = subtasks.filter((s) => s.profileId === margaret.id).length;
+  assert.ok(margaretsRuns > 0 && (await api('GET', `/api/projects/${shop}/usage`)).body.byProfile[margaret.id].runs >= margaretsRuns);
+  assert.ok((await api('GET', '/api/state')).body.usage.byProfile[byName('Ada Lovelace').id].runs > 0);
+
+  // Jobs projects rely on can't be left empty; removing a profile takes it off teams.
+  assert.equal((await api('DELETE', `/api/profiles/${byName('Grace Hopper').id}`)).status, 409);
+  const lastArchitect = await api('PATCH', `/api/profiles/${byName('Linus Torvalds').id}`, { job: 'developer' });
+  assert.deepEqual([lastArchitect.status, lastArchitect.body.error], [409, 'Linus Torvalds is the only architect; add another first']);
+  // The assistant is one agent: it can't be deleted, keeps its role, and nobody else takes it.
+  const ada = byName('Ada Lovelace');
+  const deleteAda = await api('DELETE', `/api/profiles/${ada.id}`);
+  assert.deepEqual([deleteAda.status, deleteAda.body.error], [409, "Ada Lovelace is the Chief of Staff, who runs the assistant, and can't be deleted"]);
+  assert.equal((await api('PATCH', `/api/profiles/${ada.id}`, { job: 'developer' })).status, 409);
+  const secondChief = await api('POST', '/api/profiles', { name: 'Second Chief', job: 'assistant' });
+  assert.deepEqual([secondChief.status, secondChief.body.error], [409, "There's only one Chief of Staff: Ada Lovelace"]);
+  assert.equal((await api('PATCH', `/api/profiles/${margaret.id}`, { job: 'assistant' })).status, 409);
+  assert.equal((await api('PATCH', `/api/profiles/${ada.id}`, { title: 'Chief of Staff' })).status, 200, 'everything else about Ada can change');
+  assert.equal((await api('DELETE', `/api/profiles/${margaret.id}`)).status, 204);
+  const after = (await api('GET', '/api/state')).body;
+  assert.deepEqual(after.projects.find((p: any) => p.id === shop).settings.team, team.filter((p) => p !== margaret.id));
+  assert.equal(after.profiles.find((p: any) => p.id === margaret.id).archived, true, 'archived, so past activity keeps the name');
+  assert.equal((await api('PATCH', `/api/profiles/${margaret.id}`, { name: 'Back again' })).status, 404);
+  assert.equal(fs.existsSync(plugin), false);
+  assert.equal((await api('DELETE', `/api/skills/${skill.body.id}`)).status, 204);
+  updateSettings(shop, { team: [] });
+});
+
+test('the skills library imports whole skill folders from a folder, GitHub and skills.sh', async () => {
+  const { importFromGit } = await import('../server/skill-import.ts');
+  const b64 = (text: string) => Buffer.from(text).toString('base64');
+  const md = (name: string) => `---\nname: ${name}\ndescription: The ${name} skill.\n---\n# ${name}\n`;
+
+  // A folder picked in the browser: each skill folder with its files; bad ones are reported, not fatal.
+  const folder = (await api('POST', '/api/skills/import/folder', {
+    source: 'my-skills',
+    skills: [
+      { where: 'skills/alpha', files: [{ path: 'SKILL.md', data: b64(md('alpha')) }, { path: 'scripts/run.sh', data: b64('echo hi\n') }] },
+      { where: 'escape', files: [{ path: 'SKILL.md', data: b64(md('escape')) }, { path: '../outside.txt', data: b64('x') }] },
+      { where: 'nameless', files: [{ path: 'skill.md', data: b64('# No frontmatter') }] },
+    ],
+  })).body;
+  assert.deepEqual(folder.added, ['alpha']);
+  assert.deepEqual(folder.skipped.map((s: any) => s.where), ['escape', 'nameless']);
+  assert.match(folder.skipped[0].reason, /Unsafe path/);
+  assert.match(folder.skipped[1].reason, /needs frontmatter with a name/);
+  const alpha = db.listSkills().find((s) => s.name === 'alpha')!;
+  assert.deepEqual([alpha.source, alpha.fileCount], ['Folder: my-skills', 2]);
+  assert.deepEqual((await api('GET', `/api/skills/${alpha.id}`)).body.files, ['SKILL.md', 'scripts/run.sh']);
+  const again = (await api('POST', '/api/skills/import/folder', { source: 'my-skills', skills: [{ where: '', files: [{ path: 'SKILL.md', data: b64(md('alpha')) }] }] })).body;
+  assert.deepEqual([again.added, again.updated], [[], ['alpha']]);
+  assert.equal(db.getSkill(alpha.id)!.fileCount, 1, 're-importing replaces the folder');
+
+  // Attached skills reach the agent with all their files.
+  await api('POST', '/api/skills/import/folder', { source: 'my-skills', skills: [{ where: '', files: [{ path: 'SKILL.md', data: b64(md('alpha')) }, { path: 'scripts/run.sh', data: b64('echo hi\n') }] }] });
+  const riley = db.listProfiles().find((p) => p.name === 'Riley')!;
+  await api('PATCH', `/api/profiles/${riley.id}`, { skillIds: [alpha.id] });
+  assert.equal(fs.readFileSync(path.join(dataDir, 'profiles', String(riley.id), 'skills', 'alpha', 'scripts', 'run.sh'), 'utf8'), 'echo hi\n');
+
+  // Links are checked before anything is cloned.
+  assert.equal((await api('POST', '/api/skills/import/github', { url: 'https://gitlab.com/owner/repo' })).status, 400);
+  assert.match((await api('POST', '/api/skills/import/skills-sh', { ref: 'https://skills.sh/site/open.feishu.cn/lark-doc' })).body.error, /GitHub-hosted/);
+
+  // Repositories (local here): a skills folder wins over stray SKILL.md files; skills.sh names one skill.
+  const commitRepo = async (files: Record<string, string>) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-skillrepo-'));
+    for (const [file, text] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
+      fs.writeFileSync(path.join(dir, file), text);
+    }
+    await git(dir, 'init', '-q', '-b', 'main');
+    await git(dir, 'add', '-A');
+    await git(dir, '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-q', '-m', 'Skills');
+    return dir;
+  };
+  const multi = await commitRepo({ 'skills/beta/SKILL.md': md('beta'), 'skills/beta/reference.md': 'notes', 'skills/gamma/SKILL.md': md('gamma'), '.factory/x/SKILL.md': md('stray'), 'README.md': '# repo' });
+  const single = await commitRepo({ 'SKILL.md': md('delta'), 'templates/note.md': 'template' });
+  try {
+    assert.deepEqual((await importFromGit(multi, { source: 'GitHub: test/multi' })).added.sort(), ['beta', 'gamma']);
+    assert.equal(db.listSkills().some((s) => s.name === 'stray'), false);
+    assert.equal(db.listSkills().find((s) => s.name === 'beta')!.fileCount, 2);
+    const one = await importFromGit(multi, { skill: 'gamma', source: 'skills.sh: test/multi/gamma' });
+    assert.deepEqual([one.added, one.updated], [[], ['gamma']]);
+    await assert.rejects(importFromGit(multi, { skill: 'missing', source: 'skills.sh: test/multi/missing' }), /No skill called "missing"/);
+    assert.deepEqual((await importFromGit(single, { source: 'GitHub: test/single' })).added, ['delta']);
+    assert.equal(db.listSkills().find((s) => s.name === 'delta')!.fileCount, 2);
+  } finally {
+    fs.rmSync(multi, { recursive: true, force: true });
+    fs.rmSync(single, { recursive: true, force: true });
+  }
+});
+
+test('providers must be installed to switch on and switched on to choose', async () => {
+  // Nothing is detected in tests, so every CLI counts as not installed; Claude starts switched on.
+  const providers = (await api('GET', '/api/state')).body.providers;
+  assert.deepEqual(providers.map((p: any) => [p.id, p.enabled, p.runsWork]), [['claude', true, true], ['codex', false, true], ['opencode', false, true], ['pi', false, true]]);
+  assert.ok(providers.find((p: any) => p.id === 'claude').models.includes('claude-opus-5-5'));
+
+  const turnOn = await api('PATCH', '/api/providers/codex', { enabled: true });
+  assert.deepEqual([turnOn.status, turnOn.body.error], [409, "Codex isn't installed: `codex` wasn't found on this machine"]);
+  assert.equal((await api('PATCH', '/api/providers/nope', { enabled: true })).status, 404);
+
+  // Every agent has a provider (Simulated unless chosen); only switched-on providers can be chosen.
+  assert.ok((await api('GET', '/api/state')).body.profiles.every((p: any) => p.provider === 'simulated'));
+  assert.match((await api('POST', '/api/profiles', { name: 'Codex fan', job: 'developer', provider: 'opencode' })).body.error, /OpenCode is switched off/);
+
+  // A provider an agent runs on can't be switched off.
+  const clone = await api('POST', '/api/profiles', { name: 'Grace on Claude', job: 'coordinator', provider: 'claude', model: '' });
+  assert.equal(clone.status, 201, clone.raw);
+  try {
+    const off = await api('PATCH', '/api/providers/claude', { enabled: false });
+    assert.deepEqual([off.status, off.body.error], [409, 'Claude is in use by Grace on Claude. Switch them to another provider first.']);
+  } finally {
+    assert.equal((await api('DELETE', `/api/profiles/${clone.body.id}`)).status, 204);
+  }
+});
+
+test('pull and push cards sync the base branch with the remote, resolving conflicts first', async () => {
+  const { refreshRemote } = await import('../server/settings.ts');
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-remote-'));
+  const clone = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-clone-'));
+  const tip = (dir: string) => git(dir, 'rev-parse', 'main');
+  const teammate = async (file: string, content: string) => {
+    fs.writeFileSync(path.join(clone, file), content);
+    await git(clone, 'add', '-A');
+    await git(clone, '-c', 'user.name=Teammate', '-c', 'user.email=teammate@localhost', 'commit', '-q', '-m', `Teammate changes ${file}`);
+    await git(clone, 'push', '-q', 'origin', 'main');
+    return tip(clone);
+  };
+  try {
+    await git(bare, 'init', '-q', '--bare', '-b', 'main');
+    await git(repo, 'remote', 'add', 'origin', bare);
+    await git(repo, 'push', '-q', 'origin', 'main');
+    assert.equal((await refreshRemote(DEMO))!.remoteUrl, bare);
+    await git(clone, 'clone', '-q', bare, '.');
+
+    // The remote moved and main didn't: a pull fast-forwards straight from the Backlog.
+    await teammate('teammate.md', 'from a teammate\n');
+    const pull = await api('POST', `/api/projects/${DEMO}/sync/pull`);
+    assert.equal(pull.status, 201, pull.raw);
+    const pulled = await waitFor(pull.body.id, (c) => c.stage === 'complete');
+    assert.equal(pulled.statusText, 'Fast-forwarded main to origin/main');
+    assert.deepEqual(stagesSeen.get(pull.body.id), ['backlog', 'complete']);
+    assert.equal(await tip(repo), await tip(bare));
+    assert.match((await until(() => notices(pull.body.id)[0])).body, /Pull origin\/main into main\*\* in \*\*Demo project\*\*: Fast-forwarded main to origin\/main\./);
+
+    // Diverged with a conflict: a push merges origin/main first, a worker resolves the conflict, tests run, then main goes out.
+    await commitOnMain('shared.md', 'our version\n');
+    const theirs = await teammate('shared.md', 'their version\n');
+    const push = (await api('POST', `/api/projects/${DEMO}/sync/push`)).body;
+    const pushed = await waitFor(push.id, (c) => c.stage === 'complete', 60_000);
+    assert.equal(pushed.statusText, 'Pushed main to origin');
+    assert.deepEqual(stagesSeen.get(push.id), ['backlog', 'in_progress', 'verification', 'complete']);
+    assert.equal(db.listSubtasks(push.id).find((s) => s.kind === 'merge')!.title, 'Resolve conflicts with origin/main');
+    assert.equal(await tip(bare), await tip(repo));
+    assert.equal(await git(repo, 'show', 'main:shared.md'), 'our version');
+    await git(repo, 'merge-base', '--is-ancestor', theirs, 'main');
+
+    // A merge into main queues a push afterwards.
+    const done = await queueCard('# Pushed after merging\n\n- push one\n- push two');
+    await waitFor(done, (c) => c.stage === 'complete' && c.worktree === null);
+    await api('POST', `/api/cards/${done}/merge`);
+    await waitFor(done, (c) => c.mergeState === 'merged');
+    const after = await until(() => db.listCards(DEMO).find((c) => c.kind === 'push' && c.id > push.id));
+    assert.match(db.listLogs(after.id).map((l) => l.text).join('\n'), new RegExp(`Queued: after merging #${done}\\.`));
+    await waitFor(after.id, (c) => c.stage === 'complete');
+    assert.equal(await tip(bare), await tip(repo));
+  } finally {
+    await git(repo, 'remote', 'remove', 'origin').catch(() => {});
+    await refreshRemote(DEMO);
+    fs.rmSync(bare, { recursive: true, force: true });
+    fs.rmSync(clone, { recursive: true, force: true });
+  }
 });
 
 after(() => fs.rmSync(otherRepo, { recursive: true, force: true }));

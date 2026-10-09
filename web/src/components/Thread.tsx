@@ -5,7 +5,7 @@ import { api } from '../api.ts';
 import { Markdown } from './Markdown.tsx';
 import { MarkdownEditor } from './MarkdownEditor.tsx';
 import { AgentName } from './AgentName.tsx';
-import { agentLabel } from '../agents.ts';
+import { useAgentLabel } from '../agents.ts';
 import type { Card, Comment } from '../../../server/types.ts';
 
 interface Props {
@@ -29,6 +29,7 @@ export function Thread({ card, cards, comments, deliveryNotes, replying, onCardC
   const end = useRef<HTMLDivElement>(null);
   const active = card.stage === 'deliverables';
   const conversation = comments.filter((c) => c.kind !== 'handoff');
+  const agentLabel = useAgentLabel();
 
   useEffect(() => {
     // Braces matter: newer browsers return a Promise from scrollIntoView, which React would treat as a cleanup.
@@ -67,7 +68,7 @@ export function Thread({ card, cards, comments, deliveryNotes, replying, onCardC
         {conversation.map((c) => (
           <div key={c.id} className={`bubble from-${c.author} k-${c.kind}`}>
             <div className="bubble-meta">
-              {c.author === 'user' ? <strong>You</strong> : <AgentName actor="coordinator" />} {KIND_LABEL[c.kind]}
+              {c.author === 'user' ? <strong>You</strong> : <AgentName actor="coordinator" avatar />} {KIND_LABEL[c.kind]}
               {c.via === 'assistant' && <span className="muted"> via <AgentName actor="assistant" as="span" /></span>}
               <span className="muted"> · {new Date(c.ts).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</span>
             </div>

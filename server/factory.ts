@@ -3,14 +3,15 @@ import * as db from './db.ts';
 import { Coordinator, HttpError } from './coordinator.ts';
 import { getProject, listProjects } from './settings.ts';
 import type { Driver } from './agents/driver.ts';
+import type { DriverName } from './types.ts';
 
 export class Factory {
   private coordinators = new Map<number, Coordinator>();
-  private driverFor: (projectId: number) => Driver;
+  private driverFor: (provider: DriverName) => Driver;
   private started = false;
   private stopped = false;
 
-  constructor(driverFor: (projectId: number) => Driver) {
+  constructor(driverFor: (provider: DriverName) => Driver) {
     this.driverFor = driverFor;
   }
 
@@ -30,7 +31,7 @@ export class Factory {
     if (existing) return existing;
     if (!getProject(projectId)) throw new HttpError(404, `Project ${projectId} not found`);
     if (this.stopped) throw new HttpError(409, 'The factory is shutting down');
-    const coordinator = new Coordinator(projectId, () => this.driverFor(projectId));
+    const coordinator = new Coordinator(projectId, (provider) => this.driverFor(provider));
     this.coordinators.set(projectId, coordinator);
     if (this.started) coordinator.start();
     return coordinator;
@@ -43,7 +44,8 @@ export class Factory {
     return this.coordinator(card.projectId);
   }
 
-  driver(projectId: number): Driver {
-    return this.driverFor(projectId);
+  /** The driver for a profile's provider. */
+  driver(provider: DriverName | ''): Driver {
+    return this.driverFor(provider || 'simulated');
   }
 }

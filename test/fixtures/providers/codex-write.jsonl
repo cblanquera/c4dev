@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"01a120f5-be5f-7053-bc29-89391fc086a0"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll create `hello.txt` in the current directory, then run `ls`."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc \"printf 'hi\\\\n' > hello.txt\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc \"printf 'hi\\\\n' > hello.txt\"","aggregated_output":"","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"/bin/zsh -lc ls","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/bin/zsh -lc ls","aggregated_output":"README.md\nhello.txt\nschema.json\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"Created [hello.txt](/tmp/smoke-Z0AI/hello.txt) containing `hi`. `ls` showed `README.md`, `hello.txt`, and `schema.json`."}}
+{"type":"turn.completed","usage":{"input_tokens":46987,"cached_input_tokens":35840,"cache_write_input_tokens":0,"output_tokens":213,"reasoning_output_tokens":60}}

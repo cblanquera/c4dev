@@ -14,9 +14,10 @@ import { HttpError } from './coordinator.ts';
 import { cardBrief } from './prompts.ts';
 import { deliveryNotes } from './delivery.ts';
 import { getProject, listProjects, settings } from './settings.ts';
+import { assistantProfile, pickProfile, runProfile } from './profiles.ts';
 import type { Factory } from './factory.ts';
-import type { AssistantAction, Driver, ProjectDigest } from './agents/driver.ts';
-import type { AssistantMessage, Card, Comment, FactoryEvent, Stage } from './types.ts';
+import type { AgentContext, AssistantAction, Driver, ProjectDigest } from './agents/driver.ts';
+import type { AgentProfile, AssistantMessage, Card, Comment, FactoryEvent, Stage } from './types.ts';
 
 /** Messages of history the agent sees. */
 const HISTORY = 30;
@@ -121,7 +122,7 @@ export class Assistant {
   private async respond(signal: AbortSignal): Promise<void> {
     const result = await this.driver().assist(
       { conversation: db.listAssistantMessages(HISTORY), projects: this.digest(), cardDetails: (id) => this.cardDetails(id) },
-      { signal, log: () => {} },
+      { signal, log: () => {}, ...this.runAs(assistantProfile(), null, null) },
     );
     signal.throwIfAborted();
     this.post('message', result.reply, this.previews(result.cardIds));
@@ -130,10 +131,15 @@ export class Assistant {
       try {
         await this.perform(action);
       } catch (err) {
-        const target = action.type === 'create_card' ? 'draft that card' : `act on #${action.cardId}`;
+        const target = action.type === 'create_card' ? 'draft that card' : action.type === 'pull' || action.type === 'push' ? `${action.type} that project` : `act on #${action.cardId}`;
         this.post('error', `I couldn't ${target}: ${errorText(err)}`, this.previews([action.cardId]));
       }
     }
+  }
+
+  /** A run by `profile`, charged to the project and card it's for (none for the conversation itself). */
+  private runAs(profile: AgentProfile, projectId: number | null, cardId: number | null): Pick<AgentContext, 'profile' | 'usage'> {
+    return { profile: runProfile(profile), usage: (u) => db.addUsage({ ...u, projectId, cardId, profileId: profile.id }) };
   }
 
   private post(kind: AssistantMessage['kind'], body: string, cardIds: number[] = [], details = ''): void {
@@ -159,7 +165,7 @@ export class Assistant {
       paused: project.settings.paused,
       cards: db.listCards(project.id)
         .filter((c) => !c.hidden && (c.stage !== 'complete' || (c.completedAt ?? 0) >= since))
-        .map((c) => ({ id: c.id, title: c.title, stage: c.stage, statusText: c.statusText, waitingFor: c.deliverableKind, completedAt: c.completedAt, merge: c.mergeState })),
+        .map((c) => ({ id: c.id, title: c.title, stage: c.stage, statusText: c.statusText, waitingFor: c.deliverableKind, completedAt: c.completedAt, merge: c.mergeState, kind: c.kind })),
     }));
   }
 
@@ -177,6 +183,12 @@ export class Assistant {
   private async perform(action: AssistantAction): Promise<void> {
     const body = String(action.body ?? '').trim();
     if (action.type === 'create_card') return this.createCard(action.projectId, body);
+    if (action.type === 'pull' || action.type === 'push') {
+      const project = getProject(action.projectId);
+      if (!project) throw new HttpError(404, `Project ${action.projectId} not found`);
+      const card = this.factory.coordinator(project.id).requestSync(action.type, 'you asked, through the assistant');
+      return this.post('action', `Queued #${card.id} to ${action.type === 'pull' ? `pull ${project.settings.remote} into` : `push to ${project.settings.remote} from`} **${project.settings.baseBranch}** in **${project.name}**.`, [card.id]);
+    }
     const card = db.getCard(action.cardId);
     if (!card || card.hidden) throw new HttpError(404, `Card #${action.cardId} not found`);
     const coordinator = this.factory.forCard(card.id);
@@ -214,8 +226,8 @@ export class Assistant {
       }
       case 'merge': {
         const base = settings(card.projectId).baseBranch;
-        coordinator.requestMerge(card.id, 'assistant');
-        return this.post('action', `Merging #${card.id} into **${base}** ${where}. If ${base} has moved, it's verified again first; I'll tell you when it lands.`, [card.id]);
+        const merge = coordinator.requestMerge(card.id, 'assistant');
+        return this.post('action', `Queued #${merge.id} to merge #${card.id} into **${base}** ${where}. If ${base} has moved, it's verified again first; I'll tell you when it lands.`, [merge.id, card.id]);
       }
       case 'resume': {
         this.mustWait(card, 'input');
@@ -251,8 +263,10 @@ export class Assistant {
     const description = card.description;
     const controller = new AbortController();
     const references = db.parseTags(description, card.id).map((id) => db.getCard(id)).filter((c): c is Card => !!c);
-    const promise = this.factory.driver(card.projectId)
-      .generateInstructions({ description, references, repoPath: settings(card.projectId).repoPath }, () => {}, controller.signal)
+    const writer = pickProfile(card.projectId, 'coordinator');
+    const promise = this.factory.driver(writer.provider)
+      .generateInstructions({ description, references, repoPath: settings(card.projectId).repoPath }, () => {},
+        { signal: controller.signal, ...this.runAs(writer, card.projectId, card.id) })
       .then((instructions) => {
         controller.signal.throwIfAborted();
         const current = db.getCard(cardId);
@@ -322,6 +336,9 @@ export class Assistant {
     if (!card || card.hidden || card.stage !== stage) return;
     const project = getProject(card.projectId)?.name ?? 'its project';
     if (stage === 'complete') {
+      // A merge card's result is announced on the card it merged.
+      if (card.kind === 'merge') return;
+      if (card.kind !== 'task') return this.post('notification', `#${card.id} **${card.title}** in **${project}**: ${card.statusText}.`, [card.id]);
       return this.post('notification', `#${card.id} **${card.title}** is complete in **${project}**.${mergeSummary(card)}${this.allDone(card)}`, [card.id]);
     }
     const need = card.deliverableKind === 'approval' ? 'is ready for your approval' : card.deliverableKind === 'input' ? 'needs your input' : 'needs your help';
@@ -334,7 +351,7 @@ export class Assistant {
     const card = db.getCard(cardId);
     if (!card || card.hidden || card.merging) return;
     const project = getProject(card.projectId)?.name ?? 'its project';
-    if (card.mergeNote.startsWith('Merge cancelled')) {
+    if (/^Merge (?:#\d+ )?cancelled/.test(card.mergeNote)) {
       return this.post('notification', `The merge of #${card.id} **${card.title}** in **${project}** was cancelled; the work stays on \`${card.branch}\`.`, [card.id]);
     }
     this.post('notification', `#${card.id} **${card.title}** in **${project}**:${mergeSummary(card)}${this.allDone(card)}`, [card.id]);

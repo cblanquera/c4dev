@@ -1,7 +1,9 @@
 /** Live factory state for every project and the assistant, kept in sync with the server over SSE. */
 import { useEffect, useMemo, useReducer, useRef } from 'react';
 import { api } from './api.ts';
-import type { AssistantState, Card, CardDetail, FactoryEvent, FactoryState, Project, Settings } from '../../server/types.ts';
+import type {
+  AgentProfile, AssistantState, Card, CardDetail, FactoryEvent, FactoryState, Project, ProviderStatus, Settings, Skill, UsageRecord, UsageTotals,
+} from '../../server/types.ts';
 
 export interface FeedItem {
   projectId: number;
@@ -9,9 +11,24 @@ export interface FeedItem {
   ts: number;
 }
 
+export const NO_USAGE: UsageTotals = { runs: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 };
+
+/** Adds one run to a running total. */
+function addRun(totals: UsageTotals | undefined, r: UsageRecord): UsageTotals {
+  const t = totals ?? NO_USAGE;
+  return {
+    runs: t.runs + 1, inputTokens: t.inputTokens + r.inputTokens, outputTokens: t.outputTokens + r.outputTokens,
+    cacheReadTokens: t.cacheReadTokens + r.cacheReadTokens, cacheWriteTokens: t.cacheWriteTokens + r.cacheWriteTokens, costUsd: t.costUsd + r.costUsd,
+  };
+}
+
 interface State {
   cards: Map<number, Card>;
   projects: Map<number, Project>;
+  profiles: Map<number, AgentProfile>;
+  skills: Map<number, Skill>;
+  usage: FactoryState['usage'];
+  providers: ProviderStatus[];
   projectDefaults: Settings | null;
   assistant: AssistantState | null;
   feed: FeedItem[];
@@ -42,6 +59,10 @@ function reducer(state: State, action: Action): State {
         ...state,
         cards: new Map(action.state.cards.map((c) => [c.id, c])),
         projects: new Map(action.state.projects.map((p) => [p.id, p])),
+        profiles: new Map(action.state.profiles.map((p) => [p.id, p])),
+        skills: new Map(action.state.skills.map((s) => [s.id, s])),
+        usage: action.state.usage,
+        providers: action.state.providers,
         projectDefaults: action.state.projectDefaults,
         assistant: action.state.assistant,
       };
@@ -69,14 +90,35 @@ function reducer(state: State, action: Action): State {
           projects.set(e.project.id, e.project);
           return { ...state, projects };
         }
+        case 'providers':
+          return { ...state, providers: e.providers };
+        case 'profile':
+          return { ...state, profiles: new Map(state.profiles).set(e.profile.id, e.profile) };
+        case 'skill':
+          return { ...state, skills: new Map(state.skills).set(e.skill.id, e.skill) };
+        case 'skill_removed': {
+          const skills = new Map(state.skills);
+          skills.delete(e.id);
+          return { ...state, skills };
+        }
+        case 'usage': {
+          const r = e.record;
+          const { byProject, byProfile } = state.usage;
+          return {
+            ...state,
+            usage: {
+              byProject: r.projectId != null ? { ...byProject, [r.projectId]: addRun(byProject[r.projectId], r) } : byProject,
+              byProfile: r.profileId != null ? { ...byProfile, [r.profileId]: addRun(byProfile[r.profileId], r) } : byProfile,
+            },
+            detail: d && d.card.id === r.cardId ? { ...d, usage: addRun(d.usage, r) } : d,
+          };
+        }
         case 'coordinator':
           return { ...state, feed: [{ projectId: e.projectId, text: e.text, ts: e.ts }, ...state.feed].slice(0, 50) };
         case 'assistant_message':
           return a ? { ...state, assistant: { ...a, messages: upsert(a.messages, e.message).slice(-MAX_MESSAGES) } } : state;
         case 'assistant_busy':
           return a ? { ...state, assistant: { ...a, busy: e.busy } } : state;
-        case 'assistant_settings':
-          return a ? { ...state, assistant: { ...a, settings: e.settings } } : state;
         case 'subtask':
           return d && d.card.id === e.subtask.cardId ? { ...state, detail: { ...d, subtasks: upsert(d.subtasks, e.subtask).sort((a, b) => a.seq - b.seq) } } : state;
         case 'log':
@@ -93,7 +135,8 @@ function reducer(state: State, action: Action): State {
 
 export function useFactory(openCardId: number | null) {
   const [state, dispatch] = useReducer(reducer, {
-    cards: new Map(), projects: new Map(), projectDefaults: null, assistant: null, feed: [], detail: null, connected: false,
+    cards: new Map(), projects: new Map(), profiles: new Map(), skills: new Map(), usage: { byProject: {}, byProfile: {} }, providers: [],
+    projectDefaults: null, assistant: null, feed: [], detail: null, connected: false,
   });
   const openRef = useRef(openCardId);
   openRef.current = openCardId;
@@ -132,5 +175,6 @@ export function useFactory(openCardId: number | null) {
 
   const cardList = useMemo(() => [...state.cards.values()], [state.cards]);
   const projectList = useMemo(() => [...state.projects.values()].sort((a, b) => a.id - b.id), [state.projects]);
-  return { ...state, cardList, projectList };
+  const profileList = useMemo(() => [...state.profiles.values()].sort((a, b) => a.id - b.id), [state.profiles]);
+  return { ...state, cardList, projectList, profileList };
 }

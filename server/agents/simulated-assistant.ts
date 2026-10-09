@@ -55,6 +55,8 @@ const ACTION_REPLY: Record<AssistantAction['type'], (id: number) => string> = {
   message_coordinator: (id) => `Passing that to the coordinator on #${id}.`,
   update_card: (id) => `Updating #${id}.`,
   merge: (id) => `Merging #${id}.`,
+  pull: () => '',
+  push: () => '',
   create_card: () => '',
 };
 
@@ -171,6 +173,15 @@ export function simulateAssistant(input: AssistantInput): AssistantReply {
 
   // New work always wins over card actions, so "create a task to approve invoices" never approves a card.
   const isCreate = !asking && !explicitCard && (CREATE_START.test(text) || CREATE_ANYWHERE.test(text));
+
+  // Project sync: "pull the demo project", "push Shop to github".
+  const sync = !asking && !explicitCard && text.match(/^(?:pull|push|sync)\b|\b(pull|push)\b[^.?!]*\b(?:remote|origin|github|gitlab|upstream)\b/i);
+  if (sync) {
+    const type = (sync[1] ?? sync[0]).toLowerCase() === 'push' ? 'push' : 'pull';
+    const project = named?.project ?? (input.projects.length === 1 ? input.projects[0] : undefined);
+    if (!project) return say(`Which project should I ${type}: ${input.projects.map((p) => p.name).join(', ')}?`);
+    return say(`Queuing a ${type} for ${project.name}.`, [], [{ type, projectId: project.id, cardId: 0, body: '' }]);
+  }
 
   // Card actions: "move #5 to the backlog", "ok approve it", "tell #5 that …".
   const action = asking || isCreate ? undefined : ACTIONS.find(([, re]) => re.test(text));

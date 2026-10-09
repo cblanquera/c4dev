@@ -1,13 +1,16 @@
 /** Shared Lucide profile: 24-unit grid, round 2-unit strokes and inherited color. */
 import {
-  ArrowLeft, ArrowRight, Bell, Check, Circle, CircleAlert, CircleCheck, CircleHelp,
+  ArrowDownToLine, ArrowLeft, ArrowRight, ArrowUpFromLine, Bell, GitMerge, Check, Circle, CircleAlert, CircleCheck, CircleHelp,
   CircleX, Copy, CornerDownRight, ChevronDown, ChevronRight, Hash, ImagePlus, Kanban, KeyRound, Link, Unlink,
   LoaderCircle, Maximize2, Minimize2, Plus, RotateCcw, Settings, Sparkles, Square, Terminal, X,
 } from 'lucide-react';
 
 const ICONS = {
+  'arrow-down-to-line': ArrowDownToLine,
   'arrow-left': ArrowLeft,
   'arrow-right': ArrowRight,
+  'arrow-up-from-line': ArrowUpFromLine,
+  'git-merge': GitMerge,
   bell: Bell,
   check: Check,
   circle: Circle,

@@ -1,6 +1,7 @@
 /** HTTP API + SSE stream. Business rules for manual moves live here. */
 import express, { type NextFunction, type Request, type Response } from 'express';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import * as db from './db.ts';
@@ -9,9 +10,16 @@ import { HttpError, backlogBlocker } from './coordinator.ts';
 import type { Factory } from './factory.ts';
 import type { Assistant } from './assistant.ts';
 import {
-  DATA_DIR, assistantSettings, createProject, defaultSettings, getProject, listProjects, pickSettings, settings, updateAssistantSettings,
-  updateProject,
+  DATA_DIR, createProject, defaultSettings, getProject, listProjects, pickSettings, refreshRemote, settings, updateProject,
 } from './settings.ts';
+import { deleteSkill, importSkills, pickProfile, removeProfile, runProfile, saveProfile, saveSkill, skillContent, skillFiles } from './profiles.ts';
+import { importFromGithub, importFromSkillsSh } from './skill-import.ts';
+import { providerStatuses, refreshProviders, setProviderEnabled } from './providers.ts';
+
+/** Folder imports carry whole skill folders, so they get a larger body limit than the rest of the API. */
+const FOLDER_IMPORT = '/api/skills/import/folder';
+/** Folders listed per request by the folder browser; type a path for anything beyond. */
+const MAX_FOLDERS = 5000;
 import { assertRepo } from './git.ts';
 import { STAGES, type CardDetail, type FactoryState, type Settings, type Stage } from './types.ts';
 import { deliveryNotes } from './delivery.ts';
@@ -45,9 +53,15 @@ function mustGetProject(id: unknown) {
 /** A project needs a name and its own git repository. Resolves `patch.repoPath` in place. */
 async function validateProject(name: string, patch: Partial<Settings>, selfId: number | null): Promise<void> {
   if (!name) throw new HttpError(400, 'Project name is required');
+  if (patch.remote !== undefined && !/^[\w.-]*$/.test(String(patch.remote))) throw new HttpError(400, 'A remote name has only letters, digits, dots, dashes and underscores');
+  if (patch.team !== undefined) {
+    if (!Array.isArray(patch.team)) throw new HttpError(400, 'The team is a list of profile ids');
+    const known = new Set(db.activeProfiles().map((p) => p.id));
+    patch.team = [...new Set(patch.team.map(Number))].filter((id) => known.has(id));
+  }
   if (patch.repoPath === undefined) return;
   // path.resolve('') is the working directory, so an empty path must be rejected first.
-  if (!String(patch.repoPath).trim()) throw new HttpError(400, 'Repository path is required');
+  if (!String(patch.repoPath).trim()) throw new HttpError(400, 'Project path is required');
   patch.repoPath = path.resolve(String(patch.repoPath).trim());
   if (selfId != null && patch.repoPath === path.resolve(settings(selfId).repoPath)) return;
   try {
@@ -68,7 +82,8 @@ export function createApp(factory: Factory, assistant: Assistant, processes: Pro
   const uploadsDir = path.join(DATA_DIR, 'uploads');
   fs.mkdirSync(uploadsDir, { recursive: true });
 
-  app.use(express.json({ limit: '2mb' }));
+  const json = express.json({ limit: '2mb' });
+  app.use((req, res, next) => (req.path === FOLDER_IMPORT ? next() : json(req, res, next)));
   app.use('/uploads', express.static(uploadsDir, { maxAge: '1y', immutable: true }));
 
   app.get('/api/state', (_req, res) => {
@@ -76,7 +91,11 @@ export function createApp(factory: Factory, assistant: Assistant, processes: Pro
       projects: listProjects(),
       cards: db.listCards(),
       projectDefaults: defaultSettings(),
-      assistant: { messages: db.listAssistantMessages(), busy: assistant.busy, settings: assistantSettings() },
+      assistant: { messages: db.listAssistantMessages(), busy: assistant.busy },
+      profiles: db.listProfiles(),
+      skills: db.listSkills(),
+      providers: providerStatuses(),
+      usage: { byProject: db.usageBy('project_id'), byProfile: db.usageBy('profile_id') },
     };
     res.json(state);
   });
@@ -104,6 +123,7 @@ export function createApp(factory: Factory, assistant: Assistant, processes: Pro
       subtasks, logs, comments,
       deliveryNotes: db.redactSecrets(card.id, deliveryNotes(card, subtasks, logs, comments, settings(card.projectId))),
       chatBusy: factory.forCard(card.id).isChatBusy(card.id),
+      usage: db.cardUsage(card.id),
     };
     res.json(detail);
   });
@@ -147,6 +167,7 @@ export function createApp(factory: Factory, assistant: Assistant, processes: Pro
     const card = mustGet(cardId(req));
     const { stage, beforeId = null, afterId = null } = req.body ?? {};
     if (!STAGES.includes(stage)) throw new HttpError(400, 'Unknown stage');
+    if (card.kind !== 'task') throw new HttpError(409, 'Merge, pull and push cards are moved by the coordinator; abort to cancel one');
     const to = stage as Stage;
     const from = card.stage;
     const allowed = (from === to && (to === 'icebox' || to === 'backlog')) || (from === 'icebox' && to === 'backlog') || (from === 'backlog' && to === 'icebox');
@@ -249,10 +270,15 @@ export function createApp(factory: Factory, assistant: Assistant, processes: Pro
     res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-cache' });
     const send = (obj: unknown) => res.write(`${JSON.stringify(obj)}\n`);
     try {
-      const instructions = await factory.driver(project.id).generateInstructions(
+      const writer = pickProfile(project.id, 'coordinator');
+      const instructions = await factory.driver(writer.provider).generateInstructions(
         { description, references, repoPath: project.settings.repoPath },
         (e) => send(e),
-        controller.signal,
+        {
+          signal: controller.signal,
+          profile: runProfile(writer),
+          usage: (u) => db.addUsage({ ...u, projectId: project.id, cardId: selfId ?? null, profileId: writer.id }),
+        },
       );
       send({ type: 'done', instructions, hash: db.hashText(description) });
     } catch (err) {
@@ -280,7 +306,7 @@ export function createApp(factory: Factory, assistant: Assistant, processes: Pro
     await validateProject(name, patch, null);
     const project = createProject(name, patch);
     factory.coordinator(project.id);
-    res.status(201).json(project);
+    res.status(201).json((await refreshRemote(project.id)) ?? project);
   }));
 
   app.patch('/api/projects/:pid', asyncRoute(async (req, res) => {
@@ -290,8 +316,118 @@ export function createApp(factory: Factory, assistant: Assistant, processes: Pro
     await validateProject(name, patch, project.id);
     const next = updateProject(project.id, { name, settings: patch });
     factory.coordinator(project.id).settingsChanged();
-    res.json(next);
+    res.json((await refreshRemote(project.id)) ?? next);
   }));
+
+  /** Pull and Push buttons: queue (or reuse) an integration card. */
+  app.post('/api/projects/:pid/sync/:kind', (req, res) => {
+    const project = mustGetProject(req.params.pid);
+    const kind = req.params.kind;
+    if (kind !== 'pull' && kind !== 'push') throw new HttpError(404, 'Unknown sync');
+    res.status(201).json(factory.coordinator(project.id).requestSync(kind));
+  });
+
+  /** Tokens and cost in one project, per profile. */
+  app.get('/api/projects/:pid/usage', (req, res) => {
+    const project = mustGetProject(req.params.pid);
+    res.json({ byProfile: db.usageBy('profile_id', project.id), total: db.usageBy('project_id')[project.id] ?? null });
+  });
+
+  // ---------------------------------------------------------------- agent profiles and skills
+
+  app.post('/api/profiles', (req, res) => {
+    res.status(201).json(saveProfile(req.body ?? {}));
+  });
+
+  app.patch('/api/profiles/:id', (req, res) => {
+    const existing = db.getProfile(Number(req.params.id));
+    if (!existing || existing.archived) throw new HttpError(404, 'Profile not found');
+    res.json(saveProfile({ ...existing, ...(req.body ?? {}) }, existing.id));
+  });
+
+  app.delete('/api/profiles/:id', (req, res) => {
+    removeProfile(Number(req.params.id));
+    res.status(204).end();
+  });
+
+  app.get('/api/skills/:id', (req, res) => {
+    const id = Number(req.params.id);
+    const content = skillContent(id);
+    res.json({ skill: db.getSkill(id), content, files: skillFiles(id) });
+  });
+
+  /** A folder picked in the browser: skill folders grouped client-side, file contents in base64. */
+  app.post(FOLDER_IMPORT, express.json({ limit: '60mb' }), (req, res) => {
+    const { source, skills } = req.body ?? {};
+    if (!Array.isArray(skills) || !skills.length) throw new HttpError(400, 'No SKILL.md files in that folder');
+    const bundles = skills.map((s: any) => ({
+      where: String(s?.where ?? ''),
+      files: Array.isArray(s?.files) ? s.files.map((f: any) => ({ path: String(f?.path ?? ''), data: Buffer.from(String(f?.data ?? ''), 'base64') })) : [],
+    }));
+    res.json(importSkills(bundles, `Folder: ${String(source ?? 'upload').slice(0, 80)}`));
+  });
+
+  app.post('/api/skills/import/github', asyncRoute(async (req, res) => {
+    const controller = new AbortController();
+    res.on('close', () => controller.abort());
+    res.json(await importFromGithub(String(req.body?.url ?? ''), controller.signal));
+  }));
+
+  app.post('/api/skills/import/skills-sh', asyncRoute(async (req, res) => {
+    const controller = new AbortController();
+    res.on('close', () => controller.abort());
+    res.json(await importFromSkillsSh(String(req.body?.ref ?? ''), controller.signal));
+  }));
+
+  app.post('/api/skills', (req, res) => {
+    if (typeof req.body?.content !== 'string') throw new HttpError(400, 'Upload a SKILL.md');
+    res.status(201).json(saveSkill(req.body.content));
+  });
+
+  app.delete('/api/skills/:id', (req, res) => {
+    deleteSkill(Number(req.params.id));
+    res.status(204).end();
+  });
+
+  // ---------------------------------------------------------------- folder browser
+
+  /**
+   * Folders for choosing a project's path: names only, never file contents.
+   * The browser can't reveal a picked folder's real path, so the server lists them.
+   */
+  app.get('/api/fs/dirs', (req, res) => {
+    const requested = String(req.query.path ?? '').trim();
+    const dir = path.resolve(requested || os.homedir());
+    const hidden = req.query.hidden === '1';
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      throw new HttpError(400, `Can't open ${dir}`);
+    }
+    const isDir = (e: fs.Dirent) => e.isDirectory() || (e.isSymbolicLink() && (() => {
+      try { return fs.statSync(path.join(dir, e.name)).isDirectory(); } catch { return false; }
+    })());
+    const all = entries
+      .filter((e) => (hidden || !e.name.startsWith('.')) && isDir(e))
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+    const dirs = all.slice(0, MAX_FOLDERS).map((e) => ({ name: e.name, path: path.join(dir, e.name), git: fs.existsSync(path.join(dir, e.name, '.git')) }));
+    const parent = path.dirname(dir);
+    res.json({ path: dir, parent: parent === dir ? null : parent, home: os.homedir(), git: fs.existsSync(path.join(dir, '.git')), dirs, truncated: all.length > dirs.length });
+  });
+
+  // ---------------------------------------------------------------- providers
+
+  app.post('/api/providers/refresh', asyncRoute(async (_req, res) => {
+    res.json(await refreshProviders());
+  }));
+
+  app.patch('/api/providers/:id', (req, res) => {
+    const status = providerStatuses().find((s) => s.id === req.params.id);
+    if (!status) throw new HttpError(404, 'Unknown provider');
+    if (typeof req.body?.enabled !== 'boolean') throw new HttpError(400, 'Say whether to switch it on or off');
+    res.json(setProviderEnabled(status.id, req.body.enabled));
+  });
 
   // ---------------------------------------------------------------- assistant
 
@@ -302,12 +438,6 @@ export function createApp(factory: Factory, assistant: Assistant, processes: Pro
     res.status(202).json({ ok: true });
   });
 
-  app.patch('/api/assistant/settings', (req, res) => {
-    const { driver, model } = req.body ?? {};
-    if (driver !== undefined && driver !== 'simulated' && driver !== 'claude') throw new HttpError(400, 'Unknown driver');
-    if (model !== undefined && (typeof model !== 'string' || !model.trim())) throw new HttpError(400, 'Model is required');
-    res.json(updateAssistantSettings({ ...(driver ? { driver } : {}), ...(model ? { model: model.trim() } : {}) }));
-  });
 
   // ---------------------------------------------------------------- static client
 

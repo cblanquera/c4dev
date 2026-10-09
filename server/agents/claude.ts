@@ -8,11 +8,12 @@ import { createSdkMcpServer, query, tool, type Options, type SDKMessage } from '
 import { z } from 'zod';
 import {
   APPROVAL_SCHEMA, ASSISTANT_SCHEMA, ASSISTANT_SYSTEM, AUDIT_SCHEMA, AUDIT_SYSTEM, INSTRUCTIONS_SYSTEM, PLAN_SCHEMA, PLAN_SYSTEM, REPLY_SCHEMA,
-  REPLY_SYSTEM, HANDOFF_SYSTEM, HANDOFF_SCHEMA, WORKER_SYSTEM, approvalPrompt, assistantPrompt, auditPrompt, instructionsPrompt, planPrompt, replyPrompt, handoffPrompt,
+  REPLY_SYSTEM, HANDOFF_SYSTEM, HANDOFF_SCHEMA, WORKER_SYSTEM, approvalPrompt, assistantPrompt, auditPrompt, instructionsPrompt, planPrompt, profileBrief, replyPrompt, handoffPrompt,
 } from '../prompts.ts';
+import type { RunProfile } from '../profiles.ts';
 import { DATA_DIR } from '../settings.ts';
 import type {
-  AgentContext, ApprovalDecision, AssistantReply, InstructionEvent, AuditResult, CoordinatorReply, Driver, PlannedSubtask, ProjectDigest, WorkResult,
+  AgentContext, ApprovalDecision, AssistantReply, InstructionEvent, AuditResult, CoordinatorReply, Driver, PlannedSubtask, ProjectDigest, RunUsage, WorkResult,
 } from './driver.ts';
 
 const READ_ONLY_TOOLS = ['Read', 'Glob', 'Grep'];
@@ -32,6 +33,9 @@ interface RunSpec {
   env?: Record<string, string>;
   mcpServers?: Options['mcpServers'];
   onMessage?: (m: SDKMessage) => void;
+  /** The profile doing the run: its brief joins the system prompt, its skills load as a plugin, its model wins. */
+  profile: RunProfile | null;
+  onUsage: (usage: RunUsage) => void;
 }
 
 /** Describes a tool call as a one-line log entry ('' to skip it). */
@@ -58,9 +62,10 @@ async function runAgent(spec: RunSpec): Promise<{ text: string; structured: unkn
 
   const options: Options = {
     cwd: spec.cwd,
-    model: spec.model,
+    model: spec.profile?.model || spec.model,
     abortController,
-    systemPrompt: { type: 'preset', preset: 'claude_code', append: spec.system },
+    systemPrompt: { type: 'preset', preset: 'claude_code', append: spec.system + profileBrief(spec.profile) },
+    ...(spec.profile?.pluginDir ? { plugins: [{ type: 'local', path: spec.profile.pluginDir, skipMcpDiscovery: true }] } : {}),
     settingSources: spec.noFiles ? [] : ['project'],
     env: { ...process.env, ...spec.env } as Record<string, string>,
     mcpServers: spec.mcpServers,
@@ -84,6 +89,12 @@ async function runAgent(spec: RunSpec): Promise<{ text: string; structured: unkn
       }
       text = message.result;
       structured = message.structured_output;
+      for (const [model, u] of Object.entries(message.modelUsage ?? {})) {
+        spec.onUsage({
+          model, inputTokens: u.inputTokens, outputTokens: u.outputTokens,
+          cacheReadTokens: u.cacheReadInputTokens, cacheWriteTokens: u.cacheCreationInputTokens, costUsd: u.costUSD,
+        });
+      }
     }
     if (spec.signal.aborted) throw new Error('aborted');
     return { text, structured };
@@ -118,14 +129,16 @@ export class ClaudeDriver implements Driver {
   async generateInstructions(
     input: { description: string; references: any[]; repoPath: string },
     onEvent: (e: InstructionEvent) => void,
-    signal: AbortSignal,
+    ctx: Pick<AgentContext, 'signal' | 'profile' | 'usage'>,
   ): Promise<string> {
     const { text } = await runAgent({
       prompt: instructionsPrompt(input.description, input.references),
       system: INSTRUCTIONS_SYSTEM,
       cwd: input.repoPath,
       model: this.model(),
-      signal,
+      signal: ctx.signal,
+      profile: ctx.profile,
+      onUsage: ctx.usage,
       readOnly: true,
       onMessage: (m) => {
         if (m.type !== 'assistant' || m.parent_tool_use_id) return;
@@ -149,6 +162,8 @@ export class ClaudeDriver implements Driver {
       cwd: input.repoPath,
       model: this.model(),
       signal: ctx.signal,
+      profile: ctx.profile,
+      onUsage: ctx.usage,
       readOnly: true,
       schema: PLAN_SCHEMA,
       onMessage: activityLogger(ctx, input.repoPath),
@@ -203,6 +218,8 @@ export class ClaudeDriver implements Driver {
       cwd: input.cwd,
       model: input.model,
       signal: ctx.signal,
+      profile: ctx.profile,
+      onUsage: ctx.usage,
       readOnly: false,
       env: input.env,
       mcpServers: { factory: factoryTools },
@@ -218,6 +235,8 @@ export class ClaudeDriver implements Driver {
       cwd: input.cwd,
       model: input.model,
       signal: ctx.signal,
+      profile: ctx.profile,
+      onUsage: ctx.usage,
       // The auditor needs git to see the diff, but must not edit.
       readOnly: true,
       extraTools: ['Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)', 'Bash(git status:*)'],
@@ -236,6 +255,8 @@ export class ClaudeDriver implements Driver {
       cwd: input.card.worktree ?? process.cwd(),
       model: this.model(),
       signal: ctx.signal,
+      profile: ctx.profile,
+      onUsage: ctx.usage,
       readOnly: true,
       schema: APPROVAL_SCHEMA,
     });
@@ -246,7 +267,7 @@ export class ClaudeDriver implements Driver {
   async handoff(input: { card: Card; subtasks: Subtask[]; cwd: string; verification: string }, ctx: AgentContext): Promise<string> {
     const { structured } = await runAgent({
       prompt: handoffPrompt(input.card, input.subtasks, input.verification),
-      system: HANDOFF_SYSTEM, cwd: input.cwd, model: this.model(), signal: ctx.signal,
+      system: HANDOFF_SYSTEM, cwd: input.cwd, model: this.model(), signal: ctx.signal, profile: ctx.profile, onUsage: ctx.usage,
       readOnly: true, schema: HANDOFF_SCHEMA,
     });
     const notes = (structured as { notes?: string } | undefined)?.notes;
@@ -262,6 +283,8 @@ export class ClaudeDriver implements Driver {
       cwd: input.repoPath,
       model: this.model(),
       signal: ctx.signal,
+      profile: ctx.profile,
+      onUsage: ctx.usage,
       readOnly: true,
       schema: REPLY_SCHEMA,
     });
@@ -295,6 +318,8 @@ export class ClaudeDriver implements Driver {
       cwd: DATA_DIR,
       model: this.model(),
       signal: ctx.signal,
+      profile: ctx.profile,
+      onUsage: ctx.usage,
       readOnly: true,
       noFiles: true,
       extraTools: ['mcp__factory__card_details'],

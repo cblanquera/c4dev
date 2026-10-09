@@ -7,8 +7,8 @@ import { createHash } from 'node:crypto';
 import { emit } from './events.ts';
 import { STAGE_LABELS } from './types.ts';
 import type {
-  AssistantMessage, AssistantMessageKind, Card, Comment, CommentAuthor, CommentKind, LogEntry, LogLevel, Settings,
-  Stage, Subtask, SubtaskKind,
+  AgentJob, AgentProfile, AssistantMessage, AssistantMessageKind, Card, CardKind, Comment, CommentAuthor, CommentKind, LogEntry,
+  LogLevel, Settings, Skill, Stage, Subtask, SubtaskKind, UsageRecord, UsageTotals,
 } from './types.ts';
 
 type Row = Record<string, any>;
@@ -92,6 +92,37 @@ CREATE TABLE IF NOT EXISTS projects (
   settings TEXT NOT NULL DEFAULT '{}',
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS profiles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  job TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  context TEXT NOT NULL DEFAULT '',
+  image_url TEXT,
+  model TEXT NOT NULL DEFAULT '',
+  skill_ids TEXT NOT NULL DEFAULT '[]',
+  created_at INTEGER NOT NULL,
+  archived INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS skills (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS usage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER,
+  card_id INTEGER,
+  profile_id INTEGER,
+  model TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0,
+  ts INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS assistant_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   author TEXT NOT NULL,
@@ -115,6 +146,16 @@ export function openDb(file: string): void {
   addColumn('cards', 'merge_state', 'merge_state TEXT');
   addColumn('cards', 'merge_note', "merge_note TEXT NOT NULL DEFAULT ''");
   addColumn('cards', 'merging', 'merging INTEGER NOT NULL DEFAULT 0');
+  addColumn('cards', 'kind', "kind TEXT NOT NULL DEFAULT 'task'");
+  addColumn('subtasks', 'profile_id', 'profile_id INTEGER');
+  addColumn('logs', 'profile_id', 'profile_id INTEGER');
+  addColumn('profiles', 'archived', 'archived INTEGER NOT NULL DEFAULT 0');
+  addColumn('profiles', 'title', "title TEXT NOT NULL DEFAULT ''");
+  addColumn('skills', 'source', "source TEXT NOT NULL DEFAULT ''");
+  addColumn('profiles', 'provider', "provider TEXT NOT NULL DEFAULT ''");
+  addColumn('skills', 'file_count', 'file_count INTEGER NOT NULL DEFAULT 1');
+  // Designer was a role; designers are now workers titled Designer.
+  db.exec(`UPDATE profiles SET job = 'developer', title = CASE WHEN title = '' THEN 'Designer' ELSE title END WHERE job = 'designer'`);
   db.exec('CREATE INDEX IF NOT EXISTS cards_project ON cards(project_id, stage, position);');
 }
 
@@ -157,6 +198,7 @@ function toCard(r: Row): Card {
   return {
     id: r.id,
     projectId: r.project_id,
+    kind: r.kind ?? 'task',
     title: deriveTitle(r.description),
     description: r.description,
     instructions: r.instructions,
@@ -213,14 +255,25 @@ function edgePosition(projectId: number, stage: Stage, edge: 'top' | 'bottom'): 
   return edge === 'top' ? r.p - 1 : r.p + 1;
 }
 
-export function createCard(input: { projectId: number; description: string; instructions: string; instructionsHash: string | null; parentId?: number | null }): Card {
+/**
+ * User tasks start at the top of the Icebox. Integration cards (merge, pull,
+ * push) start at the bottom of the Backlog, already queued.
+ */
+export function createCard(input: {
+  projectId: number; description: string; instructions: string; instructionsHash: string | null; parentId?: number | null;
+  kind?: CardKind; branch?: string | null;
+}): Card {
   const t = now();
+  const kind = input.kind ?? 'task';
+  const stage: Stage = kind === 'task' ? 'icebox' : 'backlog';
   const res = db
     .prepare(
-      `INSERT INTO cards (project_id, description, instructions, instructions_hash, stage, position, parent_id, created_at, updated_at, stage_changed_at)
-       VALUES (?, ?, ?, ?, 'icebox', ?, ?, ?, ?, ?)`,
+      `INSERT INTO cards (project_id, kind, description, instructions, instructions_hash, stage, position, parent_id, branch, status, status_text, created_at, updated_at, stage_changed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(input.projectId, input.description, input.instructions, input.instructionsHash, edgePosition(input.projectId, 'icebox', 'top'), input.parentId ?? null, t, t, t);
+    .run(input.projectId, kind, input.description, input.instructions, input.instructionsHash, stage,
+      edgePosition(input.projectId, stage, kind === 'task' ? 'top' : 'bottom'), input.parentId ?? null, input.branch ?? null,
+      kind === 'task' ? 'idle' : 'queued', kind === 'task' ? '' : 'Queued for the coordinator', t, t, t);
   return publishCard(Number(res.lastInsertRowid))!;
 }
 
@@ -331,6 +384,7 @@ function toSubtask(r: Row): Subtask {
     dependsOn: JSON.parse(r.depends_on),
     status: r.status,
     worker: r.worker,
+    profileId: r.profile_id ?? null,
     branch: r.branch,
     worktree: r.worktree,
     summary: r.summary,
@@ -383,6 +437,7 @@ export function addSubtasks(cardId: number, round: number, batch: NewSubtask[]):
 const SUBTASK_COLUMNS: Record<string, string> = {
   status: 'status',
   worker: 'worker',
+  profileId: 'profile_id',
   branch: 'branch',
   worktree: 'worktree',
   summary: 'summary',
@@ -424,12 +479,12 @@ export function currentRound(cardId: number): number {
 
 // ---------------------------------------------------------------- logs
 
-export function addLog(cardId: number, subtaskId: number | null, actor: string, level: LogLevel, text: string): LogEntry {
+export function addLog(cardId: number, subtaskId: number | null, actor: string, level: LogLevel, text: string, profileId: number | null = null): LogEntry {
   const ts = now();
   const res = db
-    .prepare('INSERT INTO logs (card_id, subtask_id, actor, level, text, ts) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(cardId, subtaskId, actor, level, text, ts);
-  const log: LogEntry = { id: Number(res.lastInsertRowid), cardId, subtaskId, actor, level, text, ts };
+    .prepare('INSERT INTO logs (card_id, subtask_id, actor, profile_id, level, text, ts) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(cardId, subtaskId, actor, profileId, level, text, ts);
+  const log: LogEntry = { id: Number(res.lastInsertRowid), cardId, subtaskId, actor, profileId, level, text, ts };
   emit({ type: 'log', log });
   return log;
 }
@@ -439,7 +494,7 @@ export function listLogs(cardId: number, limit = 2000): LogEntry[] {
     .prepare('SELECT * FROM logs WHERE card_id = ? ORDER BY id DESC LIMIT ?')
     .all(cardId, limit) as Row[];
   return rows.reverse().map((r) => ({
-    id: r.id, cardId: r.card_id, subtaskId: r.subtask_id, actor: r.actor, level: r.level, text: r.text, ts: r.ts,
+    id: r.id, cardId: r.card_id, subtaskId: r.subtask_id, actor: r.actor, profileId: r.profile_id ?? null, level: r.level, text: r.text, ts: r.ts,
   }));
 }
 
@@ -502,6 +557,129 @@ export function updateProjectRow(id: number, name: string, settings: Settings): 
 /** Cards whose project is missing are adopted, e.g. after migrating a pre-projects database. */
 export function adoptOrphanCards(projectId: number): void {
   db.prepare('UPDATE cards SET project_id = ? WHERE project_id NOT IN (SELECT id FROM projects)').run(projectId);
+}
+
+// ---------------------------------------------------------------- agent profiles
+
+function toProfile(r: Row): AgentProfile {
+  return {
+    id: r.id, name: r.name, job: r.job, title: r.title ?? '', provider: r.provider ?? '', context: r.context, imageUrl: r.image_url ?? null, model: r.model,
+    skillIds: JSON.parse(r.skill_ids), createdAt: r.created_at, archived: !!r.archived,
+  };
+}
+
+/** Every profile, archived ones included so old activity can still be named. */
+export function listProfiles(): AgentProfile[] {
+  return (db.prepare('SELECT * FROM profiles ORDER BY id').all() as Row[]).map(toProfile);
+}
+
+/** Profiles that can be assigned work. */
+export function activeProfiles(): AgentProfile[] {
+  return listProfiles().filter((p) => !p.archived);
+}
+
+export function getProfile(id: number): AgentProfile | undefined {
+  const r = db.prepare('SELECT * FROM profiles WHERE id = ?').get(id) as Row | undefined;
+  return r && toProfile(r);
+}
+
+export type ProfileInput = Pick<AgentProfile, 'name' | 'job' | 'title' | 'provider' | 'context' | 'imageUrl' | 'model' | 'skillIds'>;
+
+
+export function createProfile(input: ProfileInput): AgentProfile {
+  const res = db.prepare('INSERT INTO profiles (name, job, title, provider, context, image_url, model, skill_ids, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(input.name, input.job, input.title, input.provider, input.context, input.imageUrl, input.model, JSON.stringify(input.skillIds), now());
+  return publishProfile(Number(res.lastInsertRowid))!;
+}
+
+export function updateProfile(id: number, input: ProfileInput): AgentProfile | undefined {
+  db.prepare('UPDATE profiles SET name = ?, job = ?, title = ?, provider = ?, context = ?, image_url = ?, model = ?, skill_ids = ? WHERE id = ?')
+    .run(input.name, input.job, input.title, input.provider, input.context, input.imageUrl, input.model, JSON.stringify(input.skillIds), id);
+  return publishProfile(id);
+}
+
+/** Archives a profile: it no longer works anywhere, but past activity still shows who did it. */
+export function archiveProfile(id: number): void {
+  db.prepare("UPDATE profiles SET archived = 1, skill_ids = '[]' WHERE id = ?").run(id);
+  publishProfile(id);
+}
+
+export function profilesWithJob(job: AgentJob): AgentProfile[] {
+  return activeProfiles().filter((p) => p.job === job);
+}
+
+function publishProfile(id: number): AgentProfile | undefined {
+  const profile = getProfile(id);
+  if (profile) emit({ type: 'profile', profile });
+  return profile;
+}
+
+// ---------------------------------------------------------------- skills
+
+function toSkill(r: Row): Skill {
+  return { id: r.id, name: r.name, description: r.description, source: r.source ?? '', fileCount: r.file_count ?? 1, createdAt: r.created_at };
+}
+
+export function listSkills(): Skill[] {
+  return (db.prepare('SELECT * FROM skills ORDER BY name').all() as Row[]).map(toSkill);
+}
+
+export function getSkill(id: number): Skill | undefined {
+  const r = db.prepare('SELECT * FROM skills WHERE id = ?').get(id) as Row | undefined;
+  return r && toSkill(r);
+}
+
+export type SkillInput = Pick<Skill, 'name' | 'description' | 'source' | 'fileCount'>;
+
+/** Rows only; `profiles.ts` keeps the skill folders. */
+export function insertSkill(input: SkillInput): Skill {
+  const res = db.prepare('INSERT INTO skills (name, description, source, file_count, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run(input.name, input.description, input.source, input.fileCount, now());
+  const skill = getSkill(Number(res.lastInsertRowid))!;
+  emit({ type: 'skill', skill });
+  return skill;
+}
+
+export function updateSkillRow(id: number, input: SkillInput): Skill | undefined {
+  db.prepare('UPDATE skills SET name = ?, description = ?, source = ?, file_count = ? WHERE id = ?').run(input.name, input.description, input.source, input.fileCount, id);
+  const skill = getSkill(id);
+  if (skill) emit({ type: 'skill', skill });
+  return skill;
+}
+
+export function deleteSkillRow(id: number): void {
+  db.prepare('DELETE FROM skills WHERE id = ?').run(id);
+  emit({ type: 'skill_removed', id });
+}
+
+// ---------------------------------------------------------------- usage
+
+export function addUsage(input: Omit<UsageRecord, 'id' | 'ts'>): UsageRecord {
+  const ts = now();
+  const res = db.prepare(
+    `INSERT INTO usage (project_id, card_id, profile_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, ts)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(input.projectId, input.cardId, input.profileId, input.model, input.inputTokens, input.outputTokens, input.cacheReadTokens, input.cacheWriteTokens, input.costUsd, ts);
+  const record: UsageRecord = { ...input, id: Number(res.lastInsertRowid), ts };
+  emit({ type: 'usage', record });
+  return record;
+}
+
+const TOTALS = `COUNT(*) AS runs, COALESCE(SUM(input_tokens), 0) AS i, COALESCE(SUM(output_tokens), 0) AS o,
+  COALESCE(SUM(cache_read_tokens), 0) AS cr, COALESCE(SUM(cache_write_tokens), 0) AS cw, COALESCE(SUM(cost_usd), 0) AS c`;
+
+const toTotals = (r: Row): UsageTotals => ({ runs: r.runs, inputTokens: r.i, outputTokens: r.o, cacheReadTokens: r.cr, cacheWriteTokens: r.cw, costUsd: r.c });
+
+export function cardUsage(cardId: number): UsageTotals {
+  return toTotals(db.prepare(`SELECT ${TOTALS} FROM usage WHERE card_id = ?`).get(cardId) as Row);
+}
+
+/** Totals grouped by a column, e.g. per project or per profile, optionally within one project. */
+export function usageBy(column: 'project_id' | 'profile_id', projectId?: number): Record<number, UsageTotals> {
+  const rows = (projectId == null
+    ? db.prepare(`SELECT ${column} AS k, ${TOTALS} FROM usage WHERE ${column} IS NOT NULL GROUP BY ${column}`).all()
+    : db.prepare(`SELECT ${column} AS k, ${TOTALS} FROM usage WHERE ${column} IS NOT NULL AND project_id = ? GROUP BY ${column}`).all(projectId)) as Row[];
+  return Object.fromEntries(rows.map((r) => [r.k, toTotals(r)]));
 }
 
 // ---------------------------------------------------------------- assistant

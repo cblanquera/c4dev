@@ -23,14 +23,17 @@ CREATE TABLE cards (
 );
 CREATE TABLE comments (id INTEGER PRIMARY KEY AUTOINCREMENT, card_id INTEGER NOT NULL, author TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL, ts INTEGER NOT NULL);
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE profiles (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, job TEXT NOT NULL, context TEXT NOT NULL DEFAULT '', image_url TEXT, model TEXT NOT NULL DEFAULT '', skill_ids TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL);
+INSERT INTO profiles (name, job, created_at) VALUES ('Casey', 'designer', 1);
 INSERT INTO cards (description, stage, created_at, updated_at, stage_changed_at) VALUES ('# Old card', 'complete', 1, 1, 1);
 INSERT INTO comments (card_id, author, kind, body, ts) VALUES (1, 'user', 'input', 'hello', 1);
-INSERT INTO settings (key, value) VALUES ('repoPath', '"/work/legacy-repo"'), ('testCommand', '"make test"'), ('maxLoops', '3');
+INSERT INTO settings (key, value) VALUES ('repoPath', '"/work/legacy-repo"'), ('testCommand', '"make test"'), ('maxLoops', '3'), ('driver', '"claude"'), ('model', '"claude-sonnet-5-5"');
 `);
 legacy.close();
 
 const db = await import('../server/db.ts');
-const { initSettings, listProjects, assistantSettings, updateAssistantSettings } = await import('../server/settings.ts');
+const { initSettings, listProjects } = await import('../server/settings.ts');
+const { seedProfiles } = await import('../server/profiles.ts');
 
 test('legacy settings and cards become the first project', () => {
   db.openDb(file);
@@ -44,13 +47,12 @@ test('legacy settings and cards become the first project', () => {
   assert.equal(projects[0].settings.baseBranch, 'main');
   assert.equal(db.getCard(1)!.projectId, projects[0].id);
   assert.equal(db.listComments(1)[0].via, null);
+  // Designer is no longer a role: designers become workers titled Designer.
+  assert.deepEqual([db.getProfile(1)!.job, db.getProfile(1)!.title], ['developer', 'Designer']);
 
-  // Legacy project keys don't leak into the assistant's settings.
-  assert.equal(assistantSettings().driver, 'simulated');
-  updateAssistantSettings({ model: 'claude-sonnet-5-5' });
-  initSettings();
-  assert.equal(listProjects().length, 1);
-  assert.equal(assistantSettings().model, 'claude-sonnet-5-5');
+  // Agents now choose their provider; existing ones take what their project ran on.
+  seedProfiles();
+  assert.deepEqual([db.getProfile(1)!.provider, db.getProfile(1)!.model], ['claude', 'claude-sonnet-5-5']);
   db.closeDb();
   fs.rmSync(dataDir, { recursive: true, force: true });
 });

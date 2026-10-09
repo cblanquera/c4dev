@@ -2,7 +2,9 @@
 import { Icon } from './Icon.tsx';
 import { useEffect, useState } from 'react';
 import { AssistantChat } from './AssistantChat.tsx';
-import { ACTIVE_STAGES, type AssistantState, type Card, type Project } from '../../../server/types.ts';
+import { usageLine } from '../format.ts';
+import { teamProviders } from '../agents.ts';
+import { ACTIVE_STAGES, type AgentProfile, type AssistantState, type Card, type Project, type UsageTotals } from '../../../server/types.ts';
 
 interface Props {
   projects: Project[];
@@ -10,6 +12,8 @@ interface Props {
   cards: Map<number, Card>;
   cardList: Card[];
   assistant: AssistantState;
+  usage: Record<number, UsageTotals>;
+  profiles: AgentProfile[];
   onNewProject: () => void;
   onCardClick: (id: number) => void;
   onError: (message: string) => void;
@@ -36,15 +40,18 @@ function CopyPath({ path, onError }: { path: string; onError: (message: string) 
   );
 }
 
-function ProjectTile({ project, cards, onError }: { project: Project; cards: Card[]; onError: (message: string) => void }) {
+function ProjectTile({ project, cards, usage, profiles, onError }: { project: Project; cards: Card[]; usage?: UsageTotals; profiles: AgentProfile[]; onError: (message: string) => void }) {
+  const runs = teamProviders(project, profiles);
   const cutoff = Date.now() - project.settings.completeRetentionDays * 86_400_000;
   const visible = cards.filter((c) => !c.hidden);
+  // Anything can need you, including a blocked merge; the counts are your tasks.
   const needsYou = visible.filter((c) => c.stage === 'deliverables').length;
+  const tasks = visible.filter((c) => c.kind === 'task');
   const counts = [
-    [visible.filter((c) => ACTIVE_STAGES.includes(c.stage)).length, 'in flight'],
-    [visible.filter((c) => c.stage === 'backlog').length, 'queued'],
-    [visible.filter((c) => c.stage === 'icebox').length, 'in Icebox'],
-    [visible.filter((c) => c.stage === 'complete' && (c.completedAt ?? 0) >= cutoff).length, 'done recently'],
+    [tasks.filter((c) => ACTIVE_STAGES.includes(c.stage)).length, 'in flight'],
+    [tasks.filter((c) => c.stage === 'backlog').length, 'queued'],
+    [tasks.filter((c) => c.stage === 'icebox').length, 'in Icebox'],
+    [tasks.filter((c) => c.stage === 'complete' && (c.completedAt ?? 0) >= cutoff).length, 'done recently'],
   ].filter(([n]) => n) as [number, string][];
   return (
     <div className="project-tile">
@@ -52,7 +59,7 @@ function ProjectTile({ project, cards, onError }: { project: Project; cards: Car
         {/* The link covers the whole tile; the copy button sits above it. */}
         <h3><a className="project-tile-link" href={`#project-${project.id}`} aria-label={`${project.name} board`}>{project.name}</a></h3>
         {project.settings.paused && <span className="badge subtle">Paused</span>}
-        <span className={`badge ${project.settings.driver === 'simulated' ? 'd-approval' : 'subtle'}`}>{project.settings.driver === 'simulated' ? 'Simulated' : project.settings.model}</span>
+        <span className={`badge ${runs.simulated ? 'd-approval' : 'subtle'}`} title="What this project's agents run on">{runs.label}</span>
       </span>
       <span className="project-tile-repo">
         <span className="mono muted small" title={project.settings.repoPath}>{shortPath(project.settings.repoPath)}</span>
@@ -62,11 +69,12 @@ function ProjectTile({ project, cards, onError }: { project: Project; cards: Car
         {needsYou > 0 && <span className="badge d-input">{needsYou} need{needsYou === 1 ? 's' : ''} you</span>}
         <span className="muted">{counts.map(([n, label]) => `${n} ${label}`).join(' · ') || 'No cards yet'}</span>
       </span>
+      {usage && <span className="muted small">{usageLine(usage)}</span>}
     </div>
   );
 }
 
-export function Home({ projects, projectMap, cards, cardList, assistant, onNewProject, onCardClick, onError }: Props) {
+export function Home({ projects, projectMap, cards, cardList, assistant, usage, profiles, onNewProject, onCardClick, onError }: Props) {
   return (
     <main className="home">
       <section className="projects" aria-labelledby="projects-title">
@@ -77,7 +85,7 @@ export function Home({ projects, projectMap, cards, cardList, assistant, onNewPr
         </header>
         <ul className="project-list">
           {projects.map((project) => (
-            <li key={project.id}><ProjectTile project={project} cards={cardList.filter((c) => c.projectId === project.id)} onError={onError} /></li>
+            <li key={project.id}><ProjectTile project={project} cards={cardList.filter((c) => c.projectId === project.id)} usage={usage[project.id]} profiles={profiles} onError={onError} /></li>
           ))}
         </ul>
       </section>

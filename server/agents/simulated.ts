@@ -31,6 +31,11 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+/** Deterministic token counts (about four characters a token) at no cost, so usage tracking works without spending. */
+function report(ctx: Pick<AgentContext, 'usage'>, input: string, output = ''): void {
+  ctx.usage({ model: 'simulated', inputTokens: Math.ceil(input.length / 4), outputTokens: Math.ceil(output.length / 4), cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 });
+}
+
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'item';
 
 const SECRET_RE = /(api[ _-]?key|\btoken|credential|password|secret|\blogin\b)/i;
@@ -59,8 +64,9 @@ export class SimulatedDriver implements Driver {
   async generateInstructions(
     input: { description: string; references: Card[] },
     onEvent: (e: InstructionEvent) => void,
-    signal: AbortSignal,
+    ctx: Pick<AgentContext, 'signal' | 'profile' | 'usage'>,
   ): Promise<string> {
+    const { signal } = ctx;
     const title = titleOf(input.description);
     const items = bullets(input.description);
     const words = input.description.split(/\s+/).filter(Boolean).length;
@@ -87,10 +93,12 @@ export class SimulatedDriver implements Driver {
       onEvent({ type: 'text', text: doc.slice(i, i + 60) });
       await sleep(15, signal);
     }
+    report(ctx, input.description, doc);
     return doc;
   }
 
   async plan(input: { card: Card }, ctx: AgentContext): Promise<PlannedSubtask[]> {
+    report(ctx, input.card.description + input.card.instructions);
     ctx.log('oneliner', 'Reading the agent instructions');
     await sleep(500, ctx.signal);
     const items = bullets(input.card.description).slice(0, 5);
@@ -106,7 +114,9 @@ export class SimulatedDriver implements Driver {
 
   async work(input: { card: Card; subtask: Subtask; cwd: string; env: Record<string, string> }, ctx: AgentContext): Promise<WorkResult> {
     const { card, subtask, cwd } = input;
+    report(ctx, subtask.instructions + card.instructions);
     ctx.log('oneliner', `Starting: ${subtask.title}`);
+    if (ctx.profile?.skills.length) ctx.log('oneliner', `Using skills: ${ctx.profile.skills.join(', ')}`);
     await sleep(600, ctx.signal);
 
     const secretName = secretNameFor(card.description);
@@ -155,6 +165,7 @@ export class SimulatedDriver implements Driver {
   }
 
   async audit(input: { card: Card; lens: string }, ctx: AgentContext): Promise<AuditResult> {
+    report(ctx, input.lens + input.card.instructions);
     ctx.log('oneliner', `$ git diff main...HEAD`);
     await sleep(500, ctx.signal);
     // Raise one finding on the very first pass so the In Progress ⇄ Verification loop is visible.
@@ -174,6 +185,7 @@ export class SimulatedDriver implements Driver {
   }
 
   async decideApproval(input: { card: Card }, ctx: AgentContext): Promise<ApprovalDecision> {
+    report(ctx, input.card.description);
     await sleep(300, ctx.signal);
     const d = input.card.description;
     if (SECRET_RE.test(d)) {
@@ -186,6 +198,7 @@ export class SimulatedDriver implements Driver {
   }
 
   async handoff(input: { card: Card; subtasks: Subtask[]; cwd: string; verification: string }, ctx: AgentContext): Promise<string> {
+    report(ctx, input.card.description + input.verification);
     await sleep(200, ctx.signal);
     ctx.signal.throwIfAborted();
     const checks = [...new Set(input.verification.split('\n').filter(Boolean))].map((line) => `- ${line}`).join('\n');
@@ -193,6 +206,7 @@ export class SimulatedDriver implements Driver {
   }
 
   async reply(input: { card: Card; thread: Comment[]; deliveryNotes: string }, ctx: AgentContext): Promise<CoordinatorReply> {
+    report(ctx, input.thread.map((c) => c.body).join('\n'));
     await sleep(400, ctx.signal);
     ctx.signal.throwIfAborted();
     const last = [...input.thread].reverse().find((c) => c.author === 'user')?.body.trim() ?? '';
@@ -223,6 +237,7 @@ export class SimulatedDriver implements Driver {
 
   /** Deterministic reading of everyday phrasing; see `simulated-assistant.ts`. */
   async assist(input: AssistantInput, ctx: AgentContext): Promise<AssistantReply> {
+    report(ctx, input.conversation.map((m) => m.body).join('\n'));
     await sleep(300, ctx.signal);
     ctx.signal.throwIfAborted();
     return simulateAssistant(input);

@@ -1,0 +1,7 @@
+interface:
+  display_name: "ChrisAI Iconography"
+  short_description: "Create and audit cohesive UI icon systems"
+  brand_color: "#55B2A1"
+  default_prompt: "Use $chrisai-iconography to create or audit a cohesive UI icon system and verify the SVG icons at their intended sizes."
+policy:
+  allow_implicit_invocation: true

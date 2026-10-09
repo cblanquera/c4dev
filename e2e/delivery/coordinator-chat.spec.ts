@@ -1,0 +1,50 @@
+import { expect, test } from '@playwright/test';
+import { createCard, expectNoHorizontalOverflow, column } from '../helpers.ts';
+
+test('completed cards include review instructions, answer questions and draft follow-up work', async ({ page, request }) => {
+  const id = await createCard(page, `# Calendar display ${test.info().project.name}\n\n- display the calendar\n- test the calendar`, { queue: true });
+  await expect(column(page, 'Complete').locator(`[data-card-id="${id}"]`)).toBeVisible({ timeout: 60_000 });
+  await page.getByRole('tab', { name: /Thread/ }).click();
+  const delivery = page.getByRole('complementary', { name: 'Card details' }).getByRole('region', { name: 'Deliverables', exact: true });
+  await expect(delivery).toContainText('How to review');
+  await expect(delivery).toContainText('no preview URL recorded');
+  await expect(delivery).toContainText('no test account recorded');
+  await expect(delivery).toContainText('Acceptance tests passed');
+  const tabs = page.getByRole('tablist', { name: 'Card sections' });
+  const threadTab = tabs.getByRole('tab', { name: 'Thread', exact: true });
+  await expect(threadTab).toHaveText('Thread');
+  await expect(threadTab.locator('.dot-unread')).toHaveCount(0);
+  await tabs.getByRole('tab', { name: 'Overview', exact: true }).click();
+  await request.post(`/api/cards/${id}/comment`, { data: { body: 'How can I review the changes?', secrets: {} } });
+  await expect(threadTab.locator('.dot-unread')).toHaveCount(1);
+  await threadTab.click();
+  await expect(threadTab.locator('.dot-unread')).toHaveCount(0);
+  await expect(page.locator('.bubble.from-coordinator')).toHaveCount(1);
+
+  const message = page.getByRole('textbox', { name: 'Message coordinator' });
+  const send = page.getByRole('button', { name: 'Send', exact: true });
+  await message.fill('How can I review the changes?');
+  await send.click();
+  await expect(page.locator('.bubble.from-coordinator')).toHaveCount(2);
+  await expect(page.locator('.bubble.from-coordinator').last()).toContainText('How to review');
+  await expect(page.locator('.stage-pill')).toHaveText('Complete');
+  await message.fill('Maybe improve it somehow');
+  await send.click();
+  await expect(page.locator('.bubble.from-coordinator').last()).toContainText('specific change');
+  let cards = (await (await request.get('/api/state')).json()).cards;
+  expect(cards.filter((card: { parentId: number }) => card.parentId === id)).toHaveLength(0);
+
+  await message.fill(`Can you add a timezone selector ${test.info().project.name} to calendar settings?`);
+  await send.click();
+  const reply = page.locator('.bubble.from-coordinator').last();
+  await expect(reply).toContainText('in the Icebox');
+  cards = (await (await request.get('/api/state')).json()).cards;
+  const draft = cards.find((card: { parentId: number }) => card.parentId === id);
+  expect(draft.stage).toBe('icebox');
+  expect(draft.instructions).toBe('');
+  await page.screenshot({ path: test.info().outputPath('handoff-and-chat.png') });
+  await expectNoHorizontalOverflow(page);
+  await reply.getByRole('link', { name: `#${draft.id}`, exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`#card-${draft.id}$`));
+  await expect(page.getByRole('button', { name: /Move to Backlog/ })).toBeDisabled();
+});

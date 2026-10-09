@@ -1,0 +1,37 @@
+{
+  "name": "c4dev",
+  "version": "0.1.0",
+  "description": "Software factory: a kanban board where a coordinator agent plans, builds, verifies and accepts work with worker agents in git worktrees.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "server": "node --watch server/index.ts",
+    "web": "vite",
+    "build": "vite build",
+    "start": "NODE_ENV=production node server/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test 'test/**/*.test.ts'",
+    "test:e2e": "node scripts/test-e2e.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.293",
+    "dompurify": "^3.4.16",
+    "express": "^5.2.1",
+    "lucide-react": "^1.53.0",
+    "marked": "^18.1.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.3"
+  }
+}

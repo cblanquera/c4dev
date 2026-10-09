@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.factory/
+coverage/
+test-results/
+playwright-report/
+.shot.mjs

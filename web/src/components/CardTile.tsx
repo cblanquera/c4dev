@@ -1,0 +1,64 @@
+import { Icon } from './Icon.tsx';
+import type { DragEvent } from 'react';
+import type { Card } from '../../../server/types.ts';
+
+const BUSY = new Set(['planning', 'running', 'testing', 'auditing', 'deciding', 'replying']);
+
+export function isBusy(card: Card): boolean {
+  return BUSY.has(card.status);
+}
+
+const DELIVERABLE_LABEL = { approval: 'Approval', input: 'Needs input', blocked: 'Needs help' } as const;
+
+interface Props {
+  card: Card;
+  selected: boolean;
+  draggable: boolean;
+  dragging: boolean;
+  onOpen: () => void;
+  onDragStart: (e: DragEvent) => void;
+  onDragEnd: () => void;
+}
+
+export function CardTile({ card, selected, draggable, dragging, onOpen, onDragStart, onDragEnd }: Props) {
+  const stale = card.stage === 'icebox' && (!card.instructions.trim() ? 'No agent instructions yet' : !card.instructionsCurrent ? 'Instructions are outdated' : '');
+  return (
+    <article
+      className={`card ${selected ? 'selected' : ''} ${dragging ? 'dragging' : ''} ${draggable ? 'draggable' : ''}`}
+      draggable={draggable}
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      onClick={onOpen}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onOpen();
+        }
+      }}
+      tabIndex={0}
+      aria-label={`Card ${card.id}: ${card.title}`}
+    >
+      <div className="card-top">
+        <span className="mono muted">#{card.id}</span>
+        {card.deliverableKind && <span className={`badge d-${card.deliverableKind}`}>{DELIVERABLE_LABEL[card.deliverableKind]}</span>}
+        <span className="spacer" />
+        {card.loops > 0 && <span className="badge subtle" title="Times sent back to In Progress"><Icon name="rotate-ccw" size={12} /> {card.loops}</span>}
+        {card.coverage != null && <span className="badge subtle" title="Line coverage">{Math.round(card.coverage)}%</span>}
+        {card.secretNames.length > 0 && <span className="badge subtle" title={`Secrets: ${card.secretNames.join(', ')}`} role="img" aria-label={`Secrets: ${card.secretNames.join(', ')}`}><Icon name="key-round" size={12} /></span>}
+      </div>
+      <h3 className="card-title">{card.title}</h3>
+      {(card.statusText || stale) && (
+        <div className={`card-status ${stale ? 'warn' : ''}`}>
+          {isBusy(card) && <Icon name="loader-circle" size={12} className="spinner" />}
+          <span>{stale || card.statusText}</span>
+        </div>
+      )}
+      {(card.tags.length > 0 || card.parentId) && (
+        <div className="card-tags">
+          {card.parentId && <span className="chip" title="Follow-up of"><Icon name="corner-down-right" size={12} /> #{card.parentId}</span>}
+          {card.tags.filter((t) => t !== card.parentId).map((t) => <span key={t} className="chip">#{t}</span>)}
+        </div>
+      )}
+    </article>
+  );
+}

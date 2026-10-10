@@ -87,7 +87,7 @@ export function parseSkill(content: string): { name: string; description: string
 }
 
 export const skillSlug = (name: string) => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
-const skillDir = (id: number) => path.join(SKILLS_DIR, String(id));
+export const skillDir = (id: number) => path.join(SKILLS_DIR, String(id));
 /** Skill entry files go by SKILL.md; skills.md and lower case are accepted on import. */
 export const isSkillFile = (name: string) => /^skills?\.md$/i.test(name);
 

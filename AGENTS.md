@@ -20,7 +20,9 @@ Before you finish a change, run `npm run typecheck` and `npm test`. If you touch
 | Path | Responsibility |
 |---|---|
 | `server/types.ts` | Domain types shared with the client. No Node imports here. |
-| `server/db.ts` | SQLite via `node:sqlite`. **Every mutation emits a `FactoryEvent`.** Also migrates older databases. |
+| `server/db.ts` | SQLite via `node:sqlite`. **Every mutation emits a `FactoryEvent`.** Also versions, backs up and migrates the schema. |
+| `server/crypto.ts` | AES-256-GCM sealing for card secrets, with the key in `secret.key` (or `FACTORY_SECRET_KEY`). |
+| `server/transfer.ts` | Export and import of the setup: skills, agents, projects (never cards or secrets). |
 | `server/settings.ts` | Per-project settings (cached, defaults merged), model lists and provider defaults. |
 | `server/factory.ts` | One coordinator per project; routes card work to the card's coordinator. |
 | `server/profiles.ts` | Agent profiles, the skills library and per-profile plugin folders, team assignment (`pickProfile`, `needsFor`). |
@@ -73,7 +75,8 @@ Before you finish a change, run `npm run typecheck` and `npm test`. If you touch
   - merge subtasks really run the `git merge` named in their instructions, keeping this card's side of conflicts;
   - every run reports estimated tokens at zero cost as model `simulated`, and workers log `Using skills: …`;
   - the assistant reads intents anywhere in a sentence, names projects by name or repository folder, and reads "it" as the card last shown. New-task requests always win over card actions, and questions never act. Add a unit test for any phrasing you teach it.
-- **Secrets** go through `db.setSecrets` / `getSecrets` only. Never put secret values in logs, comments, events or the `Card` sent to clients (only `secretNames`).
+- **Secrets** go through `db.setSecrets` / `getSecrets` only; they're encrypted at rest. Never put secret values in logs, comments, events, exports or the `Card` sent to clients (only `secretNames`).
+- **Schema changes:** add columns with `addColumn` in `openDb` (idempotent). A change that rewrites data goes in `MIGRATIONS` under a new `SCHEMA_VERSION`; the database is backed up before it runs, and a newer database is refused.
 - **Models:** the default is `claude-opus-5-5`. Don't hardcode model IDs outside `settings.ts` (`CLAUDE_MODELS`).
 - **Providers:** a new provider needs a driver (and recorded fixtures) before it joins `WORK_PROVIDERS`. Read-only roles must stay unable to write; `test/cli.test.ts` checks every CLI's flags. Validate every driver choice with `assertUsable`. Tests must not depend on which CLIs are installed.
 - **Style:** match the surrounding code. Doc comments on modules and non-obvious functions, short comments only where the *why* isn't clear. No new dependencies without a good reason.

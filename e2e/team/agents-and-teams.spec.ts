@@ -27,7 +27,7 @@ test.describe('Journey: choosing the team', () => {
     const settings = page.getByRole('main');
     const menu = page.getByRole('navigation', { name: 'Settings sections' });
     await expect(settings.getByRole('heading', { name: 'Agents' })).toBeVisible();
-    await expect(menu.getByRole('link')).toHaveText(['Back to App', 'Agents', 'Skills', 'Providers']);
+    await expect(menu.getByRole('link')).toHaveText(['Back to App', 'Agents', 'Skills', 'Providers', 'Data']);
     await menu.getByRole('link', { name: 'Skills' }).click();
     await expect(page).toHaveURL(/#settings\/skills$/);
     await settings.getByRole('button', { name: 'Add skills' }).click();

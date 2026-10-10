@@ -15,7 +15,7 @@ process.env.FACTORY_DATA = dataDir;
 process.env.FACTORY_SIM_SPEED = '0';
 
 const db = await import('../server/db.ts');
-const { initSettings, updateSettings, defaultSettings } = await import('../server/settings.ts');
+const { initSettings, updateSettings, defaultSettings, settings: settingsOf } = await import('../server/settings.ts');
 const { ensureDemoRepo } = await import('../server/git.ts');
 const { Coordinator } = await import('../server/coordinator.ts');
 const { Factory } = await import('../server/factory.ts');
@@ -746,3 +746,44 @@ test('pull and push cards sync the base branch with the remote, resolving confli
 });
 
 after(() => fs.rmSync(otherRepo, { recursive: true, force: true }));
+
+// ---------------------------------------------------------------- data
+
+test('the setup exports and imports skills, agents and projects, never secrets; backups are taken on request', async () => {
+  const id = (await api('POST', '/api/cards', { projectId: DEMO, description: '# Exported card', instructions: '', instructionsHash: null })).body.id;
+  db.setSecrets(id, { DEPLOY_TOKEN: 'never-exported-value' });
+  const exported = await api('GET', '/api/export');
+  assert.equal(exported.status, 200);
+  assert.equal(exported.body.format, 'c4dev-export');
+  assert.ok(exported.body.agents.some((a: any) => a.job === 'assistant' && a.name === 'Ada Lovelace'));
+  assert.ok(exported.body.projects.some((p: any) => p.settings.repoPath === repo && Array.isArray(p.settings.team)));
+  assert.ok(!exported.raw.includes('never-exported-value') && !exported.raw.includes('Exported card'), 'no secrets, no cards');
+
+  const maxLoops = settingsOf(DEMO).maxLoops;
+  const bundle = structuredClone(exported.body);
+  const worker = bundle.agents.find((a: any) => a.job === 'developer');
+  bundle.agents.push({ ...worker, name: 'Imported Ivy', provider: 'not-a-provider', model: 'x' });
+  bundle.projects.find((p: any) => p.settings.repoPath === repo).settings.maxLoops = 4;
+  bundle.projects.push({ name: 'Gone', settings: { repoPath: path.join(dataDir, 'no-such-repo'), team: ['Imported Ivy'] } });
+  const imported = await api('POST', '/api/import', bundle);
+  assert.equal(imported.status, 200, imported.raw);
+  assert.ok(imported.body.added.includes('agent Imported Ivy'));
+  assert.ok(imported.body.updated.includes('agent Ada Lovelace') && imported.body.updated.includes('project Demo project'));
+  assert.deepEqual(imported.body.skipped.map((s: any) => s.where), ["agent Imported Ivy's provider", 'project Gone']);
+  const ivy = db.activeProfiles().find((p) => p.name === 'Imported Ivy')!;
+  assert.deepEqual([ivy.provider, ivy.model], ['simulated', ''], "a provider that isn't switched on here falls back to Simulated");
+  assert.equal(db.profilesWithJob('assistant').length, 1, 'the Chief of Staff is updated, not duplicated');
+  assert.equal(settingsOf(DEMO).maxLoops, 4);
+  assert.equal((await api('POST', '/api/import', { hello: 'world' })).status, 400);
+
+  const backup = await api('POST', '/api/backups');
+  assert.equal(backup.status, 201);
+  const listed = (await api('GET', '/api/backups')).body;
+  assert.ok(listed.backups.some((b: any) => b.name === backup.body.name && b.name.endsWith('-manual.db')));
+  assert.ok(!fs.readFileSync(backup.body.path).includes('never-exported-value'), 'secrets are encrypted in backups');
+  assert.equal(listed.keyFile, path.join(dataDir, 'secret.key'));
+
+  await api('DELETE', `/api/profiles/${ivy.id}`);
+  await api('PATCH', `/api/projects/${DEMO}`, { settings: { maxLoops } });
+  await api('DELETE', `/api/cards/${id}`);
+});

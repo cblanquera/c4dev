@@ -1,10 +1,15 @@
 /**
  * SQLite persistence (node:sqlite). Every mutation emits a FactoryEvent so
- * connected clients stay in sync without polling.
+ * connected clients stay in sync without polling. Card secrets are encrypted
+ * (crypto.ts). The schema version is SQLite's `user_version`; an older
+ * database is backed up before it's upgraded.
  */
+import fs from 'node:fs';
+import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { emit } from './events.ts';
+import { isSealed, loadKey, seal, unseal } from './crypto.ts';
 import { STAGE_LABELS } from './types.ts';
 import type {
   AgentJob, AgentProfile, AssistantMessage, AssistantMessageKind, Card, CardKind, Comment, CommentAuthor, CommentKind, LogEntry,
@@ -134,10 +139,32 @@ CREATE TABLE IF NOT EXISTS assistant_messages (
 );
 `;
 
+/**
+ * 1: the schema and columns below, added idempotently (every database before
+ * versioning). 2: card secrets encrypted, their names kept beside them.
+ */
+export const SCHEMA_VERSION = 2;
+/** Upgrades that change data, by the version they bring a database to. */
+const MIGRATIONS: Record<number, () => void> = {
+  2: () => sealSecrets(db, key),
+};
+const MAX_BACKUPS = 10;
+
 let db: DatabaseSync;
+let dbFile: string;
+let key: Buffer;
 
 export function openDb(file: string): void {
+  const existed = fs.existsSync(file) && fs.statSync(file).size > 0;
   db = new DatabaseSync(file);
+  dbFile = file;
+  key = loadKey(path.dirname(file));
+  const version = Number((db.prepare('PRAGMA user_version').get() as Row).user_version);
+  if (version > SCHEMA_VERSION) {
+    db.close();
+    throw new Error(`${file} is from a newer version of the factory (schema ${version}, this one knows ${SCHEMA_VERSION}). Update the factory, or restore a backup.`);
+  }
+  if (existed && version < SCHEMA_VERSION) backupDb(`v${version}-before-upgrade`);
   db.exec('PRAGMA journal_mode = WAL;');
   db.exec(SCHEMA);
   // Databases from before projects existed: their cards belong to the first project.
@@ -156,7 +183,65 @@ export function openDb(file: string): void {
   addColumn('skills', 'file_count', 'file_count INTEGER NOT NULL DEFAULT 1');
   // Designer was a role; designers are now workers titled Designer.
   db.exec(`UPDATE profiles SET job = 'developer', title = CASE WHEN title = '' THEN 'Designer' ELSE title END WHERE job = 'designer'`);
+  addColumn('cards', 'secret_names', "secret_names TEXT NOT NULL DEFAULT '[]'");
   db.exec('CREATE INDEX IF NOT EXISTS cards_project ON cards(project_id, stage, position);');
+  for (let v = Math.max(version, 1) + 1; v <= SCHEMA_VERSION; v++) MIGRATIONS[v]?.();
+  db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+}
+
+/** Encrypts secrets stored before encryption, recording their names. Works on any connection (backups too). */
+function sealSecrets(conn: DatabaseSync, secretKey: Buffer): void {
+  const columns = conn.prepare('PRAGMA table_info(cards)').all() as Row[];
+  if (!columns.some((c) => c.name === 'secrets')) return;
+  const names = columns.some((c) => c.name === 'secret_names');
+  for (const r of conn.prepare('SELECT id, secrets FROM cards').all() as Row[]) {
+    if (isSealed(r.secrets)) continue;
+    const plain = JSON.parse(r.secrets || '{}') as Record<string, string>;
+    if (names) conn.prepare('UPDATE cards SET secrets = ?, secret_names = ? WHERE id = ?').run(seal(secretKey, JSON.stringify(plain)), JSON.stringify(Object.keys(plain)), r.id);
+    else conn.prepare('UPDATE cards SET secrets = ? WHERE id = ?').run(seal(secretKey, JSON.stringify(plain)), r.id);
+  }
+}
+
+export interface Backup {
+  name: string;
+  path: string;
+  bytes: number;
+  createdAt: number;
+}
+
+export const backupsDir = () => path.join(path.dirname(dbFile), 'backups');
+
+/**
+ * A consistent copy of the database in `backups/`, keeping the latest ten.
+ * Secrets in the copy are encrypted too, even when it's taken before the
+ * upgrade that encrypts them. Restore by stopping the factory and copying a
+ * backup over factory.db; it needs the same secret.key.
+ */
+export function backupDb(reason: string): Backup {
+  const dir = backupsDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const name = `factory-${new Date().toISOString().replace(/[:.]/g, '-')}-${reason.replace(/[^\w-]+/g, '-')}.db`;
+  const file = path.join(dir, name);
+  db.prepare('VACUUM INTO ?').run(file);
+  const copy = new DatabaseSync(file);
+  try {
+    sealSecrets(copy, key);
+  } finally {
+    copy.close();
+  }
+  fs.chmodSync(file, 0o600);
+  for (const old of listBackups().slice(MAX_BACKUPS)) fs.rmSync(old.path, { force: true });
+  return listBackups().find((b) => b.name === name)!;
+}
+
+/** Backups, newest first. */
+export function listBackups(): Backup[] {
+  const dir = backupsDir();
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir).filter((f) => /^factory-.*\.db$/.test(f)).map((f) => {
+    const stat = fs.statSync(path.join(dir, f));
+    return { name: f, path: path.join(dir, f), bytes: stat.size, createdAt: stat.mtimeMs };
+  }).sort((a, b) => b.name.localeCompare(a.name));
 }
 
 function addColumn(table: string, column: string, ddl: string): void {
@@ -217,7 +302,7 @@ function toCard(r: Row): Card {
     acceptanceReady: !!r.acceptance_ready,
     deliverableKind: r.deliverable_kind,
     resumeStage: r.resume_stage,
-    secretNames: Object.keys(JSON.parse(r.secrets)),
+    secretNames: JSON.parse(r.secret_names ?? '[]'),
     hidden: !!r.hidden,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
@@ -354,12 +439,13 @@ export function positionBetween(projectId: number, stage: Stage, beforeId: numbe
 
 export function getSecrets(id: number): Record<string, string> {
   const r = db.prepare('SELECT secrets FROM cards WHERE id = ?').get(id) as Row | undefined;
-  return r ? JSON.parse(r.secrets) : {};
+  return r ? JSON.parse(unseal(key, r.secrets)) : {};
 }
 
 export function setSecrets(id: number, secrets: Record<string, string>): void {
   const merged = { ...getSecrets(id), ...secrets };
-  db.prepare('UPDATE cards SET secrets = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(merged), now(), id);
+  db.prepare('UPDATE cards SET secrets = ?, secret_names = ?, updated_at = ? WHERE id = ?')
+    .run(seal(key, JSON.stringify(merged)), JSON.stringify(Object.keys(merged)), now(), id);
   publishCard(id);
 }
 

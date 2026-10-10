@@ -35,7 +35,8 @@ export async function skillsFromFolder(files: File[]) {
   return { source: all[0]?.path.split('/')[0] ?? 'folder', skills };
 }
 
-function summary(result: SkillImport): string {
+/** "Added a, b. Skipped c (reason)" for an import's result. */
+export function importSummary(result: SkillImport): string {
   const parts = [
     result.added.length ? `Added ${result.added.join(', ')}` : '',
     result.updated.length ? `Updated ${result.updated.join(', ')}` : '',
@@ -64,7 +65,7 @@ function AddSkillsDialog({ onClose, onError }: { onClose: () => void; onError: (
     setBusy(true);
     setResult('');
     try {
-      setResult(summary(await fn()));
+      setResult(importSummary(await fn()));
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Import failed');
     } finally {

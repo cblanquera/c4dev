@@ -25,7 +25,7 @@ CREATE TABLE comments (id INTEGER PRIMARY KEY AUTOINCREMENT, card_id INTEGER NOT
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE profiles (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, job TEXT NOT NULL, context TEXT NOT NULL DEFAULT '', image_url TEXT, model TEXT NOT NULL DEFAULT '', skill_ids TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL);
 INSERT INTO profiles (name, job, created_at) VALUES ('Casey', 'designer', 1);
-INSERT INTO cards (description, stage, created_at, updated_at, stage_changed_at) VALUES ('# Old card', 'complete', 1, 1, 1);
+INSERT INTO cards (description, stage, secrets, created_at, updated_at, stage_changed_at) VALUES ('# Old card', 'complete', '{"API_KEY":"sk-legacy-123"}', 1, 1, 1);
 INSERT INTO comments (card_id, author, kind, body, ts) VALUES (1, 'user', 'input', 'hello', 1);
 INSERT INTO settings (key, value) VALUES ('repoPath', '"/work/legacy-repo"'), ('testCommand', '"make test"'), ('maxLoops', '3'), ('driver', '"claude"'), ('model', '"claude-sonnet-5-5"');
 `);
@@ -49,6 +49,41 @@ test('legacy settings and cards become the first project', () => {
   assert.equal(db.listComments(1)[0].via, null);
   // Designer is no longer a role: designers become workers titled Designer.
   assert.deepEqual([db.getProfile(1)!.job, db.getProfile(1)!.title], ['developer', 'Designer']);
+
+  // Secrets are encrypted at rest; the card still knows their names and the coordinator their values.
+  assert.deepEqual(db.getCard(1)!.secretNames, ['API_KEY']);
+  assert.deepEqual(db.getSecrets(1), { API_KEY: 'sk-legacy-123' });
+  const raw = (file: string) => {
+    const conn = new DatabaseSync(file);
+    try {
+      return conn.prepare('SELECT secrets FROM cards WHERE id = 1').get() as { secrets: string };
+    } finally {
+      conn.close();
+    }
+  };
+  assert.match(raw(file).secrets, /^enc:v1:/);
+  assert.equal(fs.statSync(path.join(dataDir, 'secret.key')).mode & 0o777, 0o600);
+  db.setSecrets(1, { OTHER: 'value-2' });
+  assert.deepEqual([db.getCard(1)!.secretNames, db.getSecrets(1).OTHER], [['API_KEY', 'OTHER'], 'value-2']);
+
+  // The old database was backed up before the upgrade, with its secrets encrypted too.
+  const [backup] = db.listBackups();
+  assert.match(backup.name, /^factory-.*-v0-before-upgrade\.db$/);
+  assert.match(raw(backup.path).secrets, /^enc:v1:/);
+  assert.ok(!fs.readFileSync(backup.path).includes('sk-legacy-123'));
+  // Reopening an up-to-date database takes no new backup; a newer one is refused.
+  db.closeDb();
+  db.openDb(file);
+  assert.equal(db.listBackups().length, 1);
+  db.closeDb();
+  const newer = new DatabaseSync(file);
+  newer.exec(`PRAGMA user_version = ${db.SCHEMA_VERSION + 1}`);
+  newer.close();
+  assert.throws(() => db.openDb(file), /newer version of the factory/);
+  const reset = new DatabaseSync(file);
+  reset.exec(`PRAGMA user_version = ${db.SCHEMA_VERSION}`);
+  reset.close();
+  db.openDb(file);
 
   // Agents now choose their provider; existing ones take what their project ran on.
   seedProfiles();

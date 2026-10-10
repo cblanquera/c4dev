@@ -38,7 +38,7 @@ function parseHash(hash: string): Route {
   if (m) return { view: 'board', projectId: null, panel: { kind: 'new', parentId: Number(m[1]) } };
   m = hash.match(/^#project-(\d+)(\/new)?$/);
   if (m) return { view: 'board', projectId: Number(m[1]), panel: m[2] ? { kind: 'new', parentId: null } : NO_PANEL };
-  m = hash.match(/^#settings(?:\/(assistant|agents|skills|providers))?$/);
+  m = hash.match(/^#settings(?:\/(assistant|agents|skills|providers|data))?$/);
   if (m) return { view: 'settings', section: (!m[1] || m[1] === 'assistant' ? 'agents' : m[1]) as SettingsSection, panel: NO_PANEL };
   return { view: 'home', panel: NO_PANEL };
 }

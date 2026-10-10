@@ -19,6 +19,12 @@ export interface SkillImport {
   skipped: { where: string; reason: string }[];
 }
 
+export interface Backups {
+  dir: string;
+  keyFile: string;
+  backups: { name: string; path: string; bytes: number; createdAt: number }[];
+}
+
 export type ProfileInput = Pick<AgentProfile, 'name' | 'job' | 'title' | 'provider' | 'context' | 'imageUrl' | 'model' | 'skillIds'>;
 
 /** This install's API token, written into the page by the server (see server/auth.ts). */
@@ -75,6 +81,10 @@ export const api = {
   ask: (body: string) => request<void>('POST', '/api/assistant/messages', { body }),
   refreshProviders: () => request<ProviderStatus[]>('POST', '/api/providers/refresh'),
   setProvider: (id: ProviderId, enabled: boolean) => request<ProviderStatus[]>('PATCH', `/api/providers/${id}`, { enabled }),
+  exportData: () => request<unknown>('GET', '/api/export'),
+  importData: (bundle: unknown) => request<SkillImport>('POST', '/api/import', bundle),
+  backups: () => request<Backups>('GET', '/api/backups'),
+  backup: () => request<Backups['backups'][number]>('POST', '/api/backups'),
   folders: (path: string, hidden: boolean) => request<FolderListing>('GET', `/api/fs/dirs?path=${encodeURIComponent(path)}${hidden ? '&hidden=1' : ''}`),
 
   async upload(file: File): Promise<string> {

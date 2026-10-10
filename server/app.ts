@@ -16,8 +16,9 @@ import { deleteSkill, importSkills, pickProfile, removeProfile, runProfile, save
 import { importFromGithub, importFromSkillsSh } from './skill-import.ts';
 import { providerStatuses, refreshProviders, setProviderEnabled } from './providers.ts';
 
-/** Folder imports carry whole skill folders, so they get a larger body limit than the rest of the API. */
-const FOLDER_IMPORT = '/api/skills/import/folder';
+/** Folder imports and factory imports carry whole skill folders, so they get a larger body limit than the rest of the API. */
+const LARGE_BODIES = ['/api/skills/import/folder', '/api/import'];
+const largeJson = express.json({ limit: '60mb' });
 /** Folders listed per request by the folder browser; type a path for anything beyond. */
 const MAX_FOLDERS = 5000;
 import { assertRepo } from './git.ts';
@@ -25,6 +26,8 @@ import { STAGES, type CardDetail, type FactoryState, type Settings, type Stage }
 import { deliveryNotes } from './delivery.ts';
 import { DevmetricsProcesses, type ProcessManager } from './processes.ts';
 import { guard, withToken } from './auth.ts';
+import { exportFactory, importFactory } from './transfer.ts';
+import { KEY_FILE } from './crypto.ts';
 
 const UPLOAD_TYPES: Record<string, string> = {
   'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp', 'image/svg+xml': '.svg',
@@ -92,7 +95,7 @@ export function createApp(factory: Factory, assistant: Assistant, { token, proce
   fs.mkdirSync(uploadsDir, { recursive: true });
 
   const json = express.json({ limit: '2mb' });
-  app.use((req, res, next) => (req.path === FOLDER_IMPORT ? next() : json(req, res, next)));
+  app.use((req, res, next) => (LARGE_BODIES.includes(req.path) ? largeJson(req, res, next) : json(req, res, next)));
   app.use('/uploads', express.static(uploadsDir, { maxAge: '1y', immutable: true }));
 
   app.get('/api/state', (_req, res) => {
@@ -306,6 +309,45 @@ export function createApp(factory: Factory, assistant: Assistant, { token, proce
     res.status(201).json({ url: `/uploads/${file}` });
   });
 
+  /** A picture from a data URL (imports), saved like an upload. */
+  function saveImage(dataUrl: string): string | null {
+    const m = dataUrl.match(/^data:([\w/+.-]+);base64,([A-Za-z0-9+/=]+)$/);
+    const ext = m && UPLOAD_TYPES[m[1]];
+    if (!m || !ext) return null;
+    const data = Buffer.from(m[2], 'base64');
+    if (!data.length || data.length > 15 * 1024 * 1024) return null;
+    const file = `${randomUUID()}${ext}`;
+    fs.writeFileSync(path.join(uploadsDir, file), data);
+    return `/uploads/${file}`;
+  }
+
+  // ---------------------------------------------------------------- data
+
+  app.get('/api/export', (_req, res) => {
+    res.attachment(`factory-export-${new Date().toISOString().slice(0, 10)}.json`).json(exportFactory());
+  });
+
+  app.post('/api/import', asyncRoute(async (req, res) => {
+    res.json(await importFactory(req.body, {
+      saveImage,
+      createProject: async (name, patch) => {
+        await validateProject(name, patch, null);
+        const project = createProject(name, patch);
+        factory.coordinator(project.id);
+        void refreshRemote(project.id);
+      },
+      projectChanged: (id) => factory.coordinator(id).settingsChanged(),
+    }));
+  }));
+
+  app.get('/api/backups', (_req, res) => {
+    res.json({ dir: db.backupsDir(), keyFile: path.join(DATA_DIR, KEY_FILE), backups: db.listBackups() });
+  });
+
+  app.post('/api/backups', (_req, res) => {
+    res.status(201).json(db.backupDb('manual'));
+  });
+
   // ---------------------------------------------------------------- projects
 
   app.post('/api/projects', asyncRoute(async (req, res) => {
@@ -366,7 +408,7 @@ export function createApp(factory: Factory, assistant: Assistant, { token, proce
   });
 
   /** A folder picked in the browser: skill folders grouped client-side, file contents in base64. */
-  app.post(FOLDER_IMPORT, express.json({ limit: '60mb' }), (req, res) => {
+  app.post('/api/skills/import/folder', (req, res) => {
     const { source, skills } = req.body ?? {};
     if (!Array.isArray(skills) || !skills.length) throw new HttpError(400, 'No SKILL.md files in that folder');
     const bundles = skills.map((s: any) => ({

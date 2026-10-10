@@ -248,7 +248,12 @@ textarea { resize: vertical; line-height: 1.5; }
 .provider-status.is-available .provider-dot { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 20%, transparent); }
 .provider-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toggle:disabled { opacity: 0.4; }
-.settings-actions { display: flex; align-items: center; gap: 10px; }
+.settings-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.data-block { display: flex; flex-direction: column; gap: 10px; }
+.data-block h3 { margin: 0; font-size: 14px; }
+.data-block .field-hint { margin: 0; overflow-wrap: anywhere; }
+.backup-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.backup-list li { display: flex; flex-direction: column; gap: 2px; padding: 8px 0; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
 .skill-source-row { display: flex; gap: 6px; }
 .skill-source-row input { flex: 1; min-width: 0; }
 .skill-result { margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--border); overflow-wrap: anywhere; }

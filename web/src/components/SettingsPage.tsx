@@ -9,6 +9,7 @@ import { useState } from 'react';
 import { api } from '../api.ts';
 import { AgentsSection } from './Agents.tsx';
 import { SkillsLibrary } from './SkillsLibrary.tsx';
+import { DataSection } from './DataSection.tsx';
 import { goHome } from '../nav.ts';
 import type { AgentProfile, Project, ProviderStatus, Skill, UsageTotals } from '../../../server/types.ts';
 
@@ -16,6 +17,7 @@ export const SETTINGS_SECTIONS = [
   { id: 'agents', label: 'Agents' },
   { id: 'skills', label: 'Skills' },
   { id: 'providers', label: 'Providers' },
+  { id: 'data', label: 'Data' },
 ] as const;
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number]['id'];
 
@@ -44,6 +46,7 @@ export function SettingsPage({ section, profiles, skills, projects, usage, provi
         {section === 'agents' && <AgentsSection profiles={profiles} skills={skills} projects={projects} usage={usage} providers={providers} onError={onError} />}
         {section === 'skills' && <SkillsLibrary skills={skills} profiles={profiles} onError={onError} />}
         {section === 'providers' && <ProvidersSection providers={providers} onError={onError} />}
+        {section === 'data' && <DataSection onError={onError} />}
       </section>
     </main>
   );

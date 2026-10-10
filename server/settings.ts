@@ -6,7 +6,8 @@ import path from 'node:path';
 import * as db from './db.ts';
 import { emit } from './events.ts';
 import { run, shellQuote } from './shell.ts';
-import type { DriverName, Project, Settings } from './types.ts';
+import { HttpError } from './errors.ts';
+import type { DriverName, Project, RunLimits, Settings } from './types.ts';
 
 export const DATA_DIR = path.resolve(process.env.FACTORY_DATA ?? '.factory');
 
@@ -34,7 +35,37 @@ export function defaultSettings(): Settings {
     paused: false,
     team: [],
     remote: 'origin',
+    budgetUsd: 0,
+    budgetTokens: 0,
   };
+}
+
+export const DEFAULT_LIMITS: RunLimits = { maxTurns: 200, runMinutes: 60 };
+const LIMIT_KEYS: Record<keyof RunLimits, string> = { maxTurns: 'limits.maxTurns', runMinutes: 'limits.runMinutes' };
+const MAX_LIMIT = 10_000;
+
+/** Caps on every agent run, factory-wide. */
+export function runLimits(): RunLimits {
+  const stored = db.loadSettings();
+  const read = (key: keyof RunLimits) => {
+    const value = Number(stored[LIMIT_KEYS[key]]);
+    return Number.isInteger(value) && value > 0 ? value : DEFAULT_LIMITS[key];
+  };
+  return { maxTurns: read('maxTurns'), runMinutes: read('runMinutes') };
+}
+
+export function setRunLimits(patch: Partial<RunLimits>): RunLimits {
+  const values: Record<string, number> = {};
+  for (const key of Object.keys(LIMIT_KEYS) as (keyof RunLimits)[]) {
+    if (patch[key] === undefined) continue;
+    const value = Number(patch[key]);
+    if (!Number.isInteger(value) || value < 1 || value > MAX_LIMIT) throw new HttpError(400, `Limits are whole numbers from 1 to ${MAX_LIMIT}`);
+    values[LIMIT_KEYS[key]] = value;
+  }
+  db.saveSettings(values);
+  const limits = runLimits();
+  emit({ type: 'limits', limits });
+  return limits;
 }
 
 /** Claude model ids to suggest; any id can still be typed. */

@@ -11,6 +11,7 @@ import { Avatar } from './Avatar.tsx';
 import { usageLine } from '../format.ts';
 import { NO_USAGE } from '../store.ts';
 import { ModelInput, ProviderSelect } from './ProviderPicker.tsx';
+import { BudgetFields } from './BudgetFields.tsx';
 import { AGENT_JOBS, JOB_LABELS, type AgentJob, type AgentProfile, type Project, type ProviderStatus, type Skill, type UsageTotals } from '../../../server/types.ts';
 import { JOB_CONTEXT, ROLE_GROUPS, assistantOf, profileTitle, providerLabel } from '../agents.ts';
 
@@ -34,11 +35,13 @@ interface SectionProps {
   skills: Map<number, Skill>;
   projects: Project[];
   usage: Record<number, UsageTotals>;
+  /** Usage per agent since the 1st of the month. */
+  monthUsage: Record<number, UsageTotals>;
   providers: ProviderStatus[];
   onError: (message: string) => void;
 }
 
-export function AgentsSection({ profiles, skills, projects, usage, providers, onError }: SectionProps) {
+export function AgentsSection({ profiles, skills, projects, usage, monthUsage, providers, onError }: SectionProps) {
   const [editing, setEditing] = useState<AgentProfile | 'new' | null>(null);
   const chief = assistantOf(profiles);
   const groups = ROLE_GROUPS.map((g) => ({ ...g, list: profiles.filter((p) => g.jobs.includes(p.job) && !p.archived && p.id !== chief?.id) })).filter((g) => g.list.length);
@@ -91,7 +94,7 @@ export function AgentsSection({ profiles, skills, projects, usage, providers, on
       ))}
       {editing && (
         <ProfileEditor profile={editing === 'new' ? null : editing} skills={skills} projects={projects} providers={providers} usage={editing === 'new' ? NO_USAGE : usage[editing.id] ?? NO_USAGE}
-          onClose={() => setEditing(null)} onError={onError} />
+          monthUsage={editing === 'new' ? NO_USAGE : monthUsage[editing.id] ?? NO_USAGE} onClose={() => setEditing(null)} onError={onError} />
       )}
     </div>
   );
@@ -105,23 +108,26 @@ interface EditorProps {
   projects: Project[];
   providers: ProviderStatus[];
   usage: UsageTotals;
+  monthUsage: UsageTotals;
   onClose: () => void;
   onError: (message: string) => void;
 }
 
 const UPLOAD_TYPES = 'image/png,image/jpeg,image/gif,image/webp,image/svg+xml';
 
-export function ProfileEditor({ profile, skills, projects, providers, usage, onClose, onError }: EditorProps) {
+export function ProfileEditor({ profile, skills, projects, providers, usage, monthUsage, onClose, onError }: EditorProps) {
   const [draft, setDraft] = useState<ProfileInput>(profile
-    ? { name: profile.name, job: profile.job, title: profile.title, provider: profile.provider, context: profile.context, imageUrl: profile.imageUrl, model: profile.model, skillIds: profile.skillIds }
-    : { name: '', job: 'developer', title: '', provider: 'simulated', context: '', imageUrl: null, model: '', skillIds: [] });
+    ? {
+      name: profile.name, job: profile.job, title: profile.title, provider: profile.provider, context: profile.context, imageUrl: profile.imageUrl,
+      model: profile.model, skillIds: profile.skillIds, budgetUsd: profile.budgetUsd, budgetTokens: profile.budgetTokens,
+    }
+    : { name: '', job: 'developer', title: '', provider: 'simulated', context: '', imageUrl: null, model: '', skillIds: [], budgetUsd: 0, budgetTokens: 0 });
   const [section, setSection] = useState<Section>('profile');
   const [skillQuery, setSkillQuery] = useState('');
   const [saving, setSaving] = useState(false);
   const imageInput = useRef<HTMLInputElement>(null);
   const sections: { id: Section; label: string }[] = [
-    { id: 'profile', label: 'Profile' }, { id: 'context', label: 'Context' }, { id: 'skills', label: 'Skills' },
-    ...(profile ? [{ id: 'usage' as const, label: 'Usage' }] : []),
+    { id: 'profile', label: 'Profile' }, { id: 'context', label: 'Context' }, { id: 'skills', label: 'Skills' }, { id: 'usage', label: 'Usage' },
   ];
   const chief = profile?.job === 'assistant';
   const set = <K extends keyof ProfileInput>(key: K, value: ProfileInput[K]) => setDraft((d) => ({ ...d, [key]: value }));
@@ -140,7 +146,17 @@ export function ProfileEditor({ profile, skills, projects, providers, usage, onC
     }
   }
 
-  const save = () => run(async () => {
+  /** Moving off the simulation spends real money or quota, so it's confirmed. */
+  function confirmPaid(): boolean {
+    if (draft.provider === 'simulated' || (profile && profile.provider !== 'simulated')) return true;
+    const label = providerLabel(draft.provider);
+    const cap = draft.budgetUsd || draft.budgetTokens
+      ? `Its monthly budget (Usage) caps it at ${[draft.budgetUsd ? `$${draft.budgetUsd}` : '', draft.budgetTokens ? `${draft.budgetTokens.toLocaleString()} tokens` : ''].filter(Boolean).join(' and ')}.`
+      : 'It has no monthly budget; you can set one in its Usage tab.';
+    return confirm(`${draft.name || 'This agent'} will run on ${label}, using this machine's ${label} login. Its runs may cost money. ${cap} Continue?`);
+  }
+
+  const save = () => confirmPaid() && run(async () => {
     await (profile ? api.updateProfile(profile.id, draft) : api.createProfile(draft));
     onClose();
   });
@@ -248,11 +264,17 @@ export function ProfileEditor({ profile, skills, projects, providers, usage, onC
               </ul>
             </fieldset>}
 
-            {section === 'usage' && profile && <fieldset>
+            {section === 'usage' && <fieldset>
               <legend>Usage</legend>
-              <p>{usageLine(usage)}</p>
-              <p className="field-hint">Estimated by the Agent SDK across every project; simulated runs cost nothing. Each project's settings show this agent's share there.</p>
-              <p className="field-hint">Works on: {projectsOf(profile, projects).map((p) => p.name).join(', ') || 'no projects'}. Choose teams in each project's settings.</p>
+              {profile && <>
+                <p>All time: {usageLine(usage)}</p>
+                <p className="field-hint">Costs are the providers' estimates across every project; simulated runs cost nothing. Each project's settings show this agent's share there.</p>
+                <p className="field-hint">Works on: {projectsOf(profile, projects).map((p) => p.name).join(', ') || 'no projects'}. Choose teams in each project's settings.</p>
+              </>}
+              <span className="field-label">Monthly budget</span>
+              <BudgetFields id="profile-budget" usd={draft.budgetUsd} tokens={draft.budgetTokens} month={monthUsage}
+                reached={draft.job === 'assistant' ? 'the assistant stops answering until you raise it' : 'work goes to others on the team, or waits in Deliverables until you raise it'}
+                onChange={({ usd, tokens }) => setDraft((d) => ({ ...d, budgetUsd: usd, budgetTokens: tokens }))} />
             </fieldset>}
           </div>
         </div>

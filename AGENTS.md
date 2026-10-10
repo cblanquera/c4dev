@@ -22,6 +22,7 @@ Before you finish a change, run `npm run typecheck` and `npm test`. If you touch
 | `server/types.ts` | Domain types shared with the client. No Node imports here. |
 | `server/db.ts` | SQLite via `node:sqlite`. **Every mutation emits a `FactoryEvent`.** Also versions, backs up and migrates the schema. |
 | `server/crypto.ts` | AES-256-GCM sealing for card secrets, with the key in `secret.key` (or `FACTORY_SECRET_KEY`). |
+| `server/budget.ts` | Monthly budgets per project and per agent (cost and tokens), checked before every run. |
 | `server/transfer.ts` | Export and import of the setup: skills, agents, projects (never cards or secrets). |
 | `server/settings.ts` | Per-project settings (cached, defaults merged), model lists and provider defaults. |
 | `server/factory.ts` | One coordinator per project; routes card work to the card's coordinator. |
@@ -56,7 +57,8 @@ Before you finish a change, run `npm run typecheck` and `npm test`. If you touch
   - The assistant acts for the user only on an explicit request, through the same coordinator methods and checks (`Coordinator.enqueue`, `approve`, …). Its thread messages carry `via: 'assistant'`.
   - Enforce new rules on the server (`app.ts` / `coordinator.ts` / `assistant.ts`), not only in the UI.
 - **New tasks always land in the Icebox.** Never queue a task as part of creating it. Only integration cards (merge, pull, push) are created in the Backlog, by the coordinator.
-- **Every agent run is done by a profile.** Build contexts with `Coordinator.ctx(…, profile)` so logs carry `profileId` and usage is recorded; report usage from drivers through `ctx.usage`.
+- **Every agent run is done by a profile.** Build contexts with `Coordinator.ctx(…, profile)` so logs carry `profileId`, usage is recorded and budgets are checked (`assertBudget`); report usage from drivers through `ctx.usage`. A run over a budget throws `BudgetError`: workers' subtasks wait as blocked (no attempt used), other runs send the card to Deliverables, and a project over budget pauses.
+- **Every run is capped** by `ctx.profile.limits` (turns and minutes, Settings → Limits). Drivers stop a run at either cap and throw `limitError`, a plain failure that counts toward the retry limits. A new driver must enforce both.
 - **Everything card-related is project scoped.** Cards need a `projectId`; columns, positions and coordinators are per project. Read settings with `settings(projectId)`, never a global.
 - **Persist through `db.ts`** so clients are notified. Don't write to SQLite anywhere else.
 - **Long-running work takes an `AbortSignal` and respects it.**

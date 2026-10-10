@@ -787,3 +787,70 @@ test('the setup exports and imports skills, agents and projects, never secrets; 
   await api('PATCH', `/api/projects/${DEMO}`, { settings: { maxLoops } });
   await api('DELETE', `/api/cards/${id}`);
 });
+
+// ---------------------------------------------------------------- budgets and limits
+
+test('budgets stop runs before they start: the project pauses, an over-budget agent waits, the assistant declines', async () => {
+  const { monthStart } = await import('../server/budget.ts');
+  const tokensUsed = (column: 'project_id' | 'profile_id', id: number) => {
+    const u = db.usageOf(column, id, monthStart());
+    return u.inputTokens + u.outputTokens;
+  };
+  const draft = async (description: string) => {
+    const gen = await api('POST', '/api/instructions', { description, projectId: DEMO });
+    const created = await api('POST', '/api/cards', { projectId: DEMO, description, instructions: gen.body.instructions, instructionsHash: gen.body.hash });
+    return created.body.id as number;
+  };
+  const queue = async (id: number) => assert.equal((await api('POST', `/api/cards/${id}/move`, { stage: 'backlog' })).status, 200);
+
+  // Room for planning only: the workers' runs don't start, and nothing new starts in the project.
+  const id = await draft('# Budgeted change\n\n- add a budget note to README');
+  assert.equal((await api('PATCH', `/api/projects/${DEMO}`, { settings: { budgetTokens: tokensUsed('project_id', DEMO) + 1 } })).status, 200);
+  await queue(id);
+  await waitFor(id, (c) => c.stage === 'deliverables');
+  assert.ok(db.listComments(id).some((c) => /^\*\*Budget reached:\*\* Demo project has used [\d,]+ of its [\d,]+ monthly tokens/.test(c.body)));
+  assert.equal(settingsOf(DEMO).paused, true, 'the coordinator pauses');
+  const subtasks = db.listSubtasks(id);
+  assert.ok(subtasks.some((s) => s.status === 'blocked'), 'the next worker waits');
+  assert.ok(subtasks.every((s) => s.attempts === 0 && ['blocked', 'pending'].includes(s.status)), 'no attempt is used up');
+  // Raised and switched back on, the card carries on.
+  await api('PATCH', `/api/projects/${DEMO}`, { settings: { budgetTokens: 0, paused: false } });
+  assert.equal((await api('POST', `/api/cards/${id}/resume`, {})).status, 200);
+  await waitFor(id, (c) => c.stage === 'complete' && c.worktree === null, 60_000);
+
+  // An agent over its own budget: the only coordinator can't plan, so the card waits; the project keeps running.
+  const grace = db.activeProfiles().find((p) => p.name === 'Grace Hopper')!;
+  const other = await draft('# Another change\n\n- add a second note to README');
+  assert.equal((await api('PATCH', `/api/profiles/${grace.id}`, { budgetTokens: 1 })).status, 200);
+  await queue(other);
+  const stopped = await waitFor(other, (c) => c.stage === 'deliverables');
+  assert.match(stopped.statusText, /^Budget reached: Grace Hopper has used/);
+  assert.equal(settingsOf(DEMO).paused, false);
+  assert.equal((await api('POST', '/api/instructions', { description: 'More', projectId: DEMO })).body.type, 'error', 'Grace writes instructions too');
+  await api('POST', `/api/cards/${other}/abort`);
+  await api('PATCH', `/api/profiles/${grace.id}`, { budgetTokens: 0 });
+
+  // The assistant over its budget says so instead of answering.
+  const ada = db.activeProfiles().find((p) => p.job === 'assistant')!;
+  await ask('Status?');
+  await api('PATCH', `/api/profiles/${ada.id}`, { budgetUsd: 0, budgetTokens: 1 });
+  const from = lastMessageId();
+  await api('POST', '/api/assistant/messages', { body: 'How is everything going?' });
+  const declined = await until(() => !assistant.busy && assistantSince(from).find((m) => m.kind === 'error'));
+  assert.match(declined.body, /Ada Lovelace has used [\d,]+ of its 1 monthly tokens/);
+  await api('PATCH', `/api/profiles/${ada.id}`, { budgetTokens: 0 });
+
+  assert.equal((await api('PATCH', `/api/projects/${DEMO}`, { settings: { budgetUsd: -1 } })).status, 400);
+  assert.equal((await api('PATCH', `/api/profiles/${ada.id}`, { budgetUsd: 'lots' })).status, 400);
+});
+
+test('run limits are factory-wide settings that every run receives', async () => {
+  const { runProfile } = await import('../server/profiles.ts');
+  assert.deepEqual((await api('GET', '/api/state')).body.limits, { maxTurns: 200, runMinutes: 60 });
+  const set = await api('PATCH', '/api/limits', { maxTurns: 50 });
+  assert.deepEqual(set.body, { maxTurns: 50, runMinutes: 60 });
+  assert.deepEqual(runProfile(db.activeProfiles()[0]).limits, { maxTurns: 50, runMinutes: 60 });
+  assert.equal((await api('PATCH', '/api/limits', { runMinutes: 0 })).status, 400);
+  assert.equal((await api('PATCH', '/api/limits', { maxTurns: 2.5 })).status, 400);
+  await api('PATCH', '/api/limits', { maxTurns: 200 });
+});

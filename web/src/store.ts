@@ -28,6 +28,7 @@ interface State {
   profiles: Map<number, AgentProfile>;
   skills: Map<number, Skill>;
   usage: FactoryState['usage'];
+  limits: FactoryState['limits'] | null;
   providers: ProviderStatus[];
   projectDefaults: Settings | null;
   assistant: AssistantState | null;
@@ -62,6 +63,7 @@ function reducer(state: State, action: Action): State {
         profiles: new Map(action.state.profiles.map((p) => [p.id, p])),
         skills: new Map(action.state.skills.map((s) => [s.id, s])),
         usage: action.state.usage,
+        limits: action.state.limits,
         providers: action.state.providers,
         projectDefaults: action.state.projectDefaults,
         assistant: action.state.assistant,
@@ -103,16 +105,24 @@ function reducer(state: State, action: Action): State {
         }
         case 'usage': {
           const r = e.record;
-          const { byProject, byProfile } = state.usage;
+          const { byProject, byProfile, month } = state.usage;
+          const thisMonth = r.ts >= month.since;
           return {
             ...state,
             usage: {
               byProject: r.projectId != null ? { ...byProject, [r.projectId]: addRun(byProject[r.projectId], r) } : byProject,
               byProfile: r.profileId != null ? { ...byProfile, [r.profileId]: addRun(byProfile[r.profileId], r) } : byProfile,
+              month: !thisMonth ? month : {
+                since: month.since,
+                byProject: r.projectId != null ? { ...month.byProject, [r.projectId]: addRun(month.byProject[r.projectId], r) } : month.byProject,
+                byProfile: r.profileId != null ? { ...month.byProfile, [r.profileId]: addRun(month.byProfile[r.profileId], r) } : month.byProfile,
+              },
             },
             detail: d && d.card.id === r.cardId ? { ...d, usage: addRun(d.usage, r) } : d,
           };
         }
+        case 'limits':
+          return { ...state, limits: e.limits };
         case 'coordinator':
           return { ...state, feed: [{ projectId: e.projectId, text: e.text, ts: e.ts }, ...state.feed].slice(0, 50) };
         case 'assistant_message':
@@ -135,7 +145,8 @@ function reducer(state: State, action: Action): State {
 
 export function useFactory(openCardId: number | null) {
   const [state, dispatch] = useReducer(reducer, {
-    cards: new Map(), projects: new Map(), profiles: new Map(), skills: new Map(), usage: { byProject: {}, byProfile: {} }, providers: [],
+    cards: new Map(), projects: new Map(), profiles: new Map(), skills: new Map(), providers: [], limits: null,
+    usage: { byProject: {}, byProfile: {}, month: { since: 0, byProject: {}, byProfile: {} } },
     projectDefaults: null, assistant: null, feed: [], detail: null, connected: false,
   });
   const openRef = useRef(openCardId);

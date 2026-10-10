@@ -38,7 +38,7 @@ function parseHash(hash: string): Route {
   if (m) return { view: 'board', projectId: null, panel: { kind: 'new', parentId: Number(m[1]) } };
   m = hash.match(/^#project-(\d+)(\/new)?$/);
   if (m) return { view: 'board', projectId: Number(m[1]), panel: m[2] ? { kind: 'new', parentId: null } : NO_PANEL };
-  m = hash.match(/^#settings(?:\/(assistant|agents|skills|providers|data))?$/);
+  m = hash.match(/^#settings(?:\/(assistant|agents|skills|providers|limits|data))?$/);
   if (m) return { view: 'settings', section: (!m[1] || m[1] === 'assistant' ? 'agents' : m[1]) as SettingsSection, panel: NO_PANEL };
   return { view: 'home', panel: NO_PANEL };
 }
@@ -59,7 +59,7 @@ export function App() {
   const [seen, setSeen] = useState(() => Number(localStorage.getItem(SEEN_KEY) ?? 0));
   const { panel } = route;
   const openId = panel.kind === 'card' ? panel.id : null;
-  const { cardList, cards, projects, projectList, profiles, profileList, skills, usage, providers, projectDefaults, assistant, feed, detail, connected } = useFactory(openId);
+  const { cardList, cards, projects, projectList, profiles, profileList, skills, usage, limits, providers, projectDefaults, assistant, feed, detail, connected } = useFactory(openId);
   const [syncing, setSyncing] = useState(false);
 
   // A card knows its project, so #card-12 links work from any board or the assistant.
@@ -186,7 +186,8 @@ export function App() {
           onNewProject={() => setDialog('new-project')} onCardClick={openCard} onError={onError} />
       )}
       {route.view === 'settings' && (
-        <SettingsPage section={route.section} profiles={profileList} skills={skills} projects={projectList} usage={usage.byProfile} providers={providers} onError={onError} />
+        <SettingsPage section={route.section} profiles={profileList} skills={skills} projects={projectList} usage={usage.byProfile} monthUsage={usage.month.byProfile}
+          limits={limits} providers={providers} onError={onError} />
       )}
       {route.view === 'board' && project && (
         <Board key={project.id} projectId={project.id} cards={projectCards} settings={project.settings} selectedId={openId} onOpen={openCard} onNew={() => go(`#project-${project.id}/new`)} onError={onError} />
@@ -236,7 +237,7 @@ export function App() {
       )}
 
       {dialog === 'project' && project && (
-        <SettingsDialog project={project} defaults={projectDefaults} profiles={profileList} onClose={() => setDialog(null)} onSaved={() => setDialog(null)} onError={onError} />
+        <SettingsDialog project={project} defaults={projectDefaults} profiles={profileList} monthUsage={usage.month.byProject[project.id]} onClose={() => setDialog(null)} onSaved={() => setDialog(null)} onError={onError} />
       )}
       {dialog === 'new-project' && (
         <SettingsDialog project={null} defaults={projectDefaults} profiles={profileList} onClose={() => setDialog(null)} onSaved={(p) => { setDialog(null); go(`#project-${p.id}`); }} onError={onError} />

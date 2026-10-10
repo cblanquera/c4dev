@@ -74,3 +74,30 @@ test('JSON answers are found plain, fenced or inside prose', () => {
   assert.deepEqual(extractJson('Sure. {"a":3} Done.'), { a: 3 });
   assert.throws(() => extractJson('no json here'), /without the expected JSON/);
 });
+
+test('a CLI run stops at its turn and time limits, as a failure', async () => {
+  const { CliDriver } = await import('../server/agents/cli.ts');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  // A stand-in codex that runs a command every 20 ms and never finishes.
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-fake-cli-'));
+  const line = JSON.stringify({ type: 'item.started', item: { id: 'i', type: 'command_execution', command: 'ls', status: 'in_progress' } });
+  fs.writeFileSync(path.join(bin, 'codex'), `#!/bin/sh\nwhile true; do echo '${line}'; sleep 0.02; done\n`, { mode: 0o755 });
+  const PATH = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${PATH}`;
+  try {
+    const driver = new CliDriver('codex', () => '');
+    const ctx = (limits: { maxTurns: number; runMinutes: number }) => ({
+      signal: new AbortController().signal, log: () => {}, usage: () => {},
+      profile: { id: 1, name: 'Grace', job: 'coordinator' as const, title: 'Coordinator', context: '', model: '', skills: [], pluginDir: null, limits },
+    });
+    const card = { id: 1, title: 't', instructions: 'i' } as any;
+    const started = Date.now();
+    await assert.rejects(driver.plan({ card, references: [], repoPath: bin }, ctx({ maxTurns: 3, runMinutes: 60 })), /Stopped after 3 turns/);
+    await assert.rejects(driver.plan({ card, references: [], repoPath: bin }, ctx({ maxTurns: 10_000, runMinutes: 0.005 })), /Stopped after 0.005 minutes/);
+    assert.ok(Date.now() - started < 10_000);
+  } finally {
+    process.env.PATH = PATH;
+    fs.rmSync(bin, { recursive: true, force: true });
+  }
+});

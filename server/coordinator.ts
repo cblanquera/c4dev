@@ -18,7 +18,8 @@ import {
   isAncestor, mergeBranch, publishToBase, pushBranch, remoteRef, removeWorktree, tipOf,
 } from './git.ts';
 import { run, tail } from './shell.ts';
-import { defaultModel, getProject, settings } from './settings.ts';
+import { defaultModel, getProject, settings, updateSettings } from './settings.ts';
+import { BudgetError, agentOverBudget, assertBudget, projectOverBudget } from './budget.ts';
 import { workerPrompt } from './prompts.ts';
 import { deliveryNotes } from './delivery.ts';
 import { HttpError } from './errors.ts';
@@ -207,6 +208,9 @@ export class Coordinator {
         this.spawn(card.id, (signal) => this.advance(card.id, signal));
       }
     }
+    // Over budget, active cards still advance, so each reaches Deliverables saying why; then nothing more starts.
+    const overBudget = projectOverBudget(this.projectId);
+    if (overBudget) return this.pauseForBudget(overBudget);
 
     // Pull from the top of the backlog while there is capacity.
     const active = cards.filter((c) => ACTIVE_STAGES.includes(c.stage) || this.jobs.has(c.id)).length;
@@ -252,6 +256,7 @@ export class Coordinator {
     const promise = fn(controller.signal)
       .catch((err) => {
         if (controller.signal.aborted || err instanceof AbortError) return;
+        if (err instanceof BudgetError) return this.stopForBudget(cardId, err);
         this.fail(cardId, err);
       })
       .finally(() => {
@@ -269,6 +274,29 @@ export class Coordinator {
     this.log(card, `Error in ${STAGE_LABELS[card.stage]}: ${message}`, 'detail');
     this.escalate(card, 'blocked', `Stuck in ${STAGE_LABELS[card.stage]}: ${message.split('\n')[0]}`,
       `I hit an error I couldn't recover from while in **${STAGE_LABELS[card.stage]}**:\n\n\`\`\`\n${tail(message, 30)}\n\`\`\`\n\nReply with guidance, or press **Resume** to retry.`);
+  }
+
+  /** A project over its monthly budget starts nothing new until the budget is raised and the coordinator switched back on. */
+  private pauseForBudget(reason: string): void {
+    if (this.cfg().paused) return;
+    updateSettings(this.projectId, { paused: true });
+    this.announce(`Paused: ${reason}. Raise the budget in project settings → Team, then switch the coordinator back on.`);
+  }
+
+  private budgetNote(err: BudgetError): string {
+    const where = err.scope === 'project'
+      ? 'Raise it in project settings → Team → Monthly budget and switch the coordinator back on'
+      : "Raise it in the agent's Usage tab (Settings → Agents), or give the work to someone else on the team";
+    return `**Budget reached:** ${err.message}. ${where}, then press **Resume**.`;
+  }
+
+  /** A run that would go over a budget doesn't start; the card waits in Deliverables. */
+  private stopForBudget(cardId: number, err: BudgetError): void {
+    const card = db.getCard(cardId);
+    if (!card) return;
+    if (err.scope === 'project') this.pauseForBudget(err.message);
+    this.log(card, `Budget reached: ${err.message}`, 'oneliner');
+    this.escalate(card, 'blocked', `Budget reached: ${err.message}`, this.budgetNote(err));
   }
 
   private escalate(card: Card, kind: 'approval' | 'input' | 'blocked', statusText: string, comment: string): void {
@@ -308,6 +336,7 @@ export class Coordinator {
 
   /** A run done by `profile`: its logs carry the profile, and its usage is charged to this project and card. */
   private ctx(cardId: number, subtaskId: number | null, actor: string, signal: AbortSignal, profile: AgentProfile = this.lead()): AgentContext {
+    assertBudget(this.projectId, profile);
     return {
       signal,
       profile: runProfile(profile),
@@ -433,6 +462,10 @@ export class Coordinator {
     try {
       const cfg = this.cfg();
       const card = db.getCard(cardId)!;
+      // Over a budget, the subtask waits like a blocked worker instead of using up an attempt.
+      const project = projectOverBudget(this.projectId);
+      const agent = project ? null : agentOverBudget(profile);
+      if (project || agent) return this.blockForBudget(card, subtask, new BudgetError(project ? 'project' : 'agent', (project ?? agent)!));
       subtask = db.updateSubtask(subtask.id, { status: 'running', worker, profileId: profile.id, attempts: subtask.attempts + 1, startedAt: Date.now(), endedAt: null })!;
       this.log(card, `Assigned "${subtask.title}" to ${profile.name}`, 'oneliner', subtask.id);
 
@@ -471,8 +504,12 @@ export class Coordinator {
         db.updateSubtask(subtask.id, { status: 'aborted', endedAt: Date.now() });
         throw new AbortError();
       }
-      const message = err instanceof Error ? err.message : String(err);
       const latest = db.getSubtask(subtask.id)!;
+      if (err instanceof BudgetError) {
+        db.updateSubtask(subtask.id, { attempts: Math.max(0, latest.attempts - 1) });
+        return this.blockForBudget(db.getCard(cardId)!, latest, err);
+      }
+      const message = err instanceof Error ? err.message : String(err);
       const retry = latest.attempts < MAX_SUBTASK_ATTEMPTS;
       db.addLog(cardId, subtask.id, worker, 'detail', `Attempt ${latest.attempts} failed: ${message}`, profile.id);
       db.updateSubtask(subtask.id, { status: retry ? 'pending' : 'failed', summary: message.split('\n')[0], endedAt: Date.now() });
@@ -481,6 +518,14 @@ export class Coordinator {
       this.busy.set(profile.id, (this.busy.get(profile.id) ?? 1) - 1);
       this.slots.release();
     }
+  }
+
+  private blockForBudget(card: Card, subtask: Subtask, err: BudgetError): void {
+    if (err.scope === 'project') this.pauseForBudget(err.message);
+    db.updateSubtask(subtask.id, { status: 'blocked', endedAt: Date.now() });
+    const note = this.budgetNote(err);
+    // Parallel subtasks hit the same budget; one note is enough.
+    if (!db.listComments(card.id).some((c) => c.author === 'coordinator' && c.body === note)) db.addComment(card.id, 'coordinator', 'question', note);
   }
 
   /** Merges a finished subtask into the card branch; conflicts become a merge subtask. */

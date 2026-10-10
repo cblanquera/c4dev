@@ -7,10 +7,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import * as db from './db.ts';
-import { DATA_DIR, listProjects, settings, updateSettings } from './settings.ts';
+import { DATA_DIR, listProjects, runLimits, settings, updateSettings } from './settings.ts';
 import { HttpError } from './errors.ts';
 import { assertUsable } from './providers.ts';
-import { AGENT_JOBS, JOB_LABELS, PROVIDERS, type AgentJob, type AgentProfile, type DriverName, type Skill, type Subtask } from './types.ts';
+import { agentOverBudget, cleanBudget } from './budget.ts';
+import { AGENT_JOBS, JOB_LABELS, PROVIDERS, type AgentJob, type AgentProfile, type DriverName, type RunLimits, type Skill, type Subtask } from './types.ts';
 
 const SKILLS_DIR = path.join(DATA_DIR, 'skills');
 const PLUGINS_DIR = path.join(DATA_DIR, 'profiles');
@@ -45,15 +46,17 @@ export interface RunProfile {
   skills: string[];
   /** A local plugin folder holding this profile's skills, or null without skills. */
   pluginDir: string | null;
+  /** Caps on the run; drivers stop a run that reaches one and report it as a failure. */
+  limits: RunLimits;
 }
 
 export function seedProfiles(): void {
   if (!db.listProfiles().length) {
-    for (const p of DEFAULT_PROFILES) db.createProfile({ ...p, provider: 'simulated', imageUrl: null, model: '', skillIds: [] });
+    for (const p of DEFAULT_PROFILES) db.createProfile({ ...p, provider: 'simulated', imageUrl: null, model: '', skillIds: [], budgetUsd: 0, budgetTokens: 0 });
   }
   // The assistant always runs as someone.
   if (!db.profilesWithJob('assistant').length) {
-    db.createProfile({ ...DEFAULT_PROFILES.find((p) => p.job === 'assistant')!, provider: 'simulated', imageUrl: null, model: '', skillIds: [] });
+    db.createProfile({ ...DEFAULT_PROFILES.find((p) => p.job === 'assistant')!, provider: 'simulated', imageUrl: null, model: '', skillIds: [], budgetUsd: 0, budgetTokens: 0 });
   }
   migrateProviders();
 }
@@ -223,6 +226,8 @@ function cleanInput(input: Partial<db.ProfileInput>): db.ProfileInput {
     imageUrl,
     model: String(input.model ?? '').trim(),
     skillIds: [...new Set((input.skillIds ?? []).map(Number))].filter((id) => known.has(id)),
+    budgetUsd: cleanBudget(input.budgetUsd, 'usd'),
+    budgetTokens: cleanBudget(input.budgetTokens, 'tokens'),
   };
 }
 
@@ -302,7 +307,8 @@ export function pickProfile(projectId: number, job: AgentJob, busy: Map<number, 
     db.profilesWithJob(job),
     db.profilesWithJob('developer'),
   ].find((list) => list.length)!;
-  const rank = (p: AgentProfile) => (prefer && prefer.test(p.title) ? 0 : 1);
+  // Agents over their monthly budget are passed over while someone else can do the work.
+  const rank = (p: AgentProfile) => (agentOverBudget(p) ? 2 : prefer && prefer.test(p.title) ? 0 : 1);
   return [...candidates].sort((a, b) => rank(a) - rank(b) || (busy.get(a.id) ?? 0) - (busy.get(b.id) ?? 0) || a.id - b.id)[0];
 }
 
@@ -317,5 +323,6 @@ export function runProfile(profile: AgentProfile): RunProfile {
   return {
     id: profile.id, name: profile.name, job: profile.job, title: profile.title || JOB_LABELS[profile.job], context: profile.context, model: profile.model, skills,
     pluginDir: skills.length && fs.existsSync(dir) ? dir : null,
+    limits: runLimits(),
   };
 }

@@ -18,6 +18,7 @@ import { assistantProfile, pickProfile, runProfile } from './profiles.ts';
 import type { Factory } from './factory.ts';
 import type { AgentContext, AssistantAction, Driver, ProjectDigest } from './agents/driver.ts';
 import type { AgentProfile, AssistantMessage, Card, Comment, FactoryEvent, Stage } from './types.ts';
+import { assertBudget } from './budget.ts';
 
 /** Messages of history the agent sees. */
 const HISTORY = 30;
@@ -137,8 +138,9 @@ export class Assistant {
     }
   }
 
-  /** A run by `profile`, charged to the project and card it's for (none for the conversation itself). */
+  /** A run by `profile`, charged to the project and card it's for (none for the conversation itself). Refused over a budget. */
   private runAs(profile: AgentProfile, projectId: number | null, cardId: number | null): Pick<AgentContext, 'profile' | 'usage'> {
+    assertBudget(projectId, profile);
     return { profile: runProfile(profile), usage: (u) => db.addUsage({ ...u, projectId, cardId, profileId: profile.id }) };
   }
 

@@ -183,6 +183,8 @@ export function openDb(file: string): void {
   addColumn('skills', 'file_count', 'file_count INTEGER NOT NULL DEFAULT 1');
   // Designer was a role; designers are now workers titled Designer.
   db.exec(`UPDATE profiles SET job = 'developer', title = CASE WHEN title = '' THEN 'Designer' ELSE title END WHERE job = 'designer'`);
+  addColumn('profiles', 'budget_usd', 'budget_usd REAL NOT NULL DEFAULT 0');
+  addColumn('profiles', 'budget_tokens', 'budget_tokens INTEGER NOT NULL DEFAULT 0');
   addColumn('cards', 'secret_names', "secret_names TEXT NOT NULL DEFAULT '[]'");
   db.exec('CREATE INDEX IF NOT EXISTS cards_project ON cards(project_id, stage, position);');
   for (let v = Math.max(version, 1) + 1; v <= SCHEMA_VERSION; v++) MIGRATIONS[v]?.();
@@ -650,7 +652,7 @@ export function adoptOrphanCards(projectId: number): void {
 function toProfile(r: Row): AgentProfile {
   return {
     id: r.id, name: r.name, job: r.job, title: r.title ?? '', provider: r.provider ?? '', context: r.context, imageUrl: r.image_url ?? null, model: r.model,
-    skillIds: JSON.parse(r.skill_ids), createdAt: r.created_at, archived: !!r.archived,
+    skillIds: JSON.parse(r.skill_ids), budgetUsd: r.budget_usd ?? 0, budgetTokens: r.budget_tokens ?? 0, createdAt: r.created_at, archived: !!r.archived,
   };
 }
 
@@ -669,18 +671,18 @@ export function getProfile(id: number): AgentProfile | undefined {
   return r && toProfile(r);
 }
 
-export type ProfileInput = Pick<AgentProfile, 'name' | 'job' | 'title' | 'provider' | 'context' | 'imageUrl' | 'model' | 'skillIds'>;
+export type ProfileInput = Pick<AgentProfile, 'name' | 'job' | 'title' | 'provider' | 'context' | 'imageUrl' | 'model' | 'skillIds' | 'budgetUsd' | 'budgetTokens'>;
 
 
 export function createProfile(input: ProfileInput): AgentProfile {
-  const res = db.prepare('INSERT INTO profiles (name, job, title, provider, context, image_url, model, skill_ids, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-    .run(input.name, input.job, input.title, input.provider, input.context, input.imageUrl, input.model, JSON.stringify(input.skillIds), now());
+  const res = db.prepare('INSERT INTO profiles (name, job, title, provider, context, image_url, model, skill_ids, budget_usd, budget_tokens, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(input.name, input.job, input.title, input.provider, input.context, input.imageUrl, input.model, JSON.stringify(input.skillIds), input.budgetUsd ?? 0, input.budgetTokens ?? 0, now());
   return publishProfile(Number(res.lastInsertRowid))!;
 }
 
 export function updateProfile(id: number, input: ProfileInput): AgentProfile | undefined {
-  db.prepare('UPDATE profiles SET name = ?, job = ?, title = ?, provider = ?, context = ?, image_url = ?, model = ?, skill_ids = ? WHERE id = ?')
-    .run(input.name, input.job, input.title, input.provider, input.context, input.imageUrl, input.model, JSON.stringify(input.skillIds), id);
+  db.prepare('UPDATE profiles SET name = ?, job = ?, title = ?, provider = ?, context = ?, image_url = ?, model = ?, skill_ids = ?, budget_usd = ?, budget_tokens = ? WHERE id = ?')
+    .run(input.name, input.job, input.title, input.provider, input.context, input.imageUrl, input.model, JSON.stringify(input.skillIds), input.budgetUsd ?? 0, input.budgetTokens ?? 0, id);
   return publishProfile(id);
 }
 
@@ -760,12 +762,17 @@ export function cardUsage(cardId: number): UsageTotals {
   return toTotals(db.prepare(`SELECT ${TOTALS} FROM usage WHERE card_id = ?`).get(cardId) as Row);
 }
 
-/** Totals grouped by a column, e.g. per project or per profile, optionally within one project. */
-export function usageBy(column: 'project_id' | 'profile_id', projectId?: number): Record<number, UsageTotals> {
+/** Totals grouped by a column, e.g. per project or per profile, optionally within one project and since a time. */
+export function usageBy(column: 'project_id' | 'profile_id', projectId?: number, since = 0): Record<number, UsageTotals> {
   const rows = (projectId == null
-    ? db.prepare(`SELECT ${column} AS k, ${TOTALS} FROM usage WHERE ${column} IS NOT NULL GROUP BY ${column}`).all()
-    : db.prepare(`SELECT ${column} AS k, ${TOTALS} FROM usage WHERE ${column} IS NOT NULL AND project_id = ? GROUP BY ${column}`).all(projectId)) as Row[];
+    ? db.prepare(`SELECT ${column} AS k, ${TOTALS} FROM usage WHERE ${column} IS NOT NULL AND ts >= ? GROUP BY ${column}`).all(since)
+    : db.prepare(`SELECT ${column} AS k, ${TOTALS} FROM usage WHERE ${column} IS NOT NULL AND project_id = ? AND ts >= ? GROUP BY ${column}`).all(projectId, since)) as Row[];
   return Object.fromEntries(rows.map((r) => [r.k, toTotals(r)]));
+}
+
+/** One project's or profile's totals since a time. */
+export function usageOf(column: 'project_id' | 'profile_id', id: number, since: number): UsageTotals {
+  return toTotals(db.prepare(`SELECT ${TOTALS} FROM usage WHERE ${column} = ? AND ts >= ?`).get(id, since) as Row);
 }
 
 // ---------------------------------------------------------------- assistant

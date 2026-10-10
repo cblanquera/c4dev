@@ -11,10 +11,11 @@ import {
   REPLY_SYSTEM, HANDOFF_SYSTEM, HANDOFF_SCHEMA, WORKER_SYSTEM, approvalPrompt, assistantPrompt, auditPrompt, instructionsPrompt, planPrompt, profileBrief, replyPrompt, handoffPrompt,
 } from '../prompts.ts';
 import type { RunProfile } from '../profiles.ts';
-import { DATA_DIR } from '../settings.ts';
+import { DATA_DIR, DEFAULT_LIMITS } from '../settings.ts';
 import type {
   AgentContext, ApprovalDecision, AssistantReply, InstructionEvent, AuditResult, CoordinatorReply, Driver, PlannedSubtask, ProjectDigest, RunUsage, WorkResult,
 } from './driver.ts';
+import { limitError } from './driver.ts';
 
 const READ_ONLY_TOOLS = ['Read', 'Glob', 'Grep'];
 
@@ -59,11 +60,18 @@ async function runAgent(spec: RunSpec): Promise<{ text: string; structured: unkn
   const abort = () => abortController.abort();
   if (spec.signal.aborted) abort();
   spec.signal.addEventListener('abort', abort, { once: true });
+  const limits = spec.profile?.limits ?? DEFAULT_LIMITS;
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    abort();
+  }, limits.runMinutes * 60_000);
 
   const options: Options = {
     cwd: spec.cwd,
     model: spec.profile?.model || spec.model,
     abortController,
+    maxTurns: limits.maxTurns,
     systemPrompt: { type: 'preset', preset: 'claude_code', append: spec.system + profileBrief(spec.profile) },
     ...(spec.profile?.pluginDir ? { plugins: [{ type: 'local', path: spec.profile.pluginDir, skipMcpDiscovery: true }] } : {}),
     settingSources: spec.noFiles ? [] : ['project'],
@@ -83,6 +91,7 @@ async function runAgent(spec: RunSpec): Promise<{ text: string; structured: unkn
     for await (const message of query({ prompt: spec.prompt, options })) {
       spec.onMessage?.(message);
       if (message.type !== 'result') continue;
+      if (message.subtype === 'error_max_turns') throw limitError('turns', limits);
       if (message.subtype !== 'success' || message.is_error) {
         const detail = 'errors' in message ? (message as any).errors?.join('; ') : (message as any).result;
         throw new Error(`Agent ended with ${message.subtype}${detail ? `: ${detail}` : ''}`);
@@ -97,8 +106,13 @@ async function runAgent(spec: RunSpec): Promise<{ text: string; structured: unkn
       }
     }
     if (spec.signal.aborted) throw new Error('aborted');
+    if (timedOut) throw limitError('time', limits);
     return { text, structured };
+  } catch (err) {
+    if (timedOut && !spec.signal.aborted) throw limitError('time', limits);
+    throw err;
   } finally {
+    clearTimeout(timer);
     spec.signal.removeEventListener('abort', abort);
   }
 }

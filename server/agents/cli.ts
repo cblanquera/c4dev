@@ -27,6 +27,8 @@ import type {
   AgentContext, ApprovalDecision, AssistantReply, AuditResult, CoordinatorReply, Driver, InstructionEvent, PlannedSubtask,
   ProjectDigest, RunUsage, WorkResult,
 } from './driver.ts';
+import { limitError } from './driver.ts';
+import { DEFAULT_LIMITS } from '../settings.ts';
 
 export type CliProvider = 'codex' | 'opencode' | 'pi';
 export type Access = 'none' | 'read' | 'write';
@@ -203,13 +205,20 @@ interface RoleRun {
   onTool?: (line: string) => void;
 }
 
+export interface CliDriverOptions {
+  /** Every raw output line, e.g. to record fixtures (scripts/smoke.ts). */
+  record?: (access: Access, line: string) => void;
+}
+
 export class CliDriver implements Driver {
   readonly name: CliProvider;
   private model: () => string;
+  private record?: CliDriverOptions['record'];
 
-  constructor(provider: CliProvider, model: () => string) {
+  constructor(provider: CliProvider, model: () => string, options: CliDriverOptions = {}) {
     this.name = provider;
     this.model = model;
+    this.record = options.record;
   }
 
   /** One CLI run: returns its last message, logging tools and reporting usage as they come. */
@@ -226,15 +235,29 @@ export class CliDriver implements Driver {
     const argv = cliCommand({ provider: this.name, cwd: spec.cwd, prompt, model, access: spec.access, schemaFile });
     let last = '';
     let error = '';
+    // The CLIs have no common turn or time limit, so tool calls are counted and the clock is kept here.
+    const limits = ctx.profile?.limits ?? DEFAULT_LIMITS;
+    const stop = new AbortController();
+    let stopped: 'turns' | 'time' | null = null;
+    let turns = 0;
+    const timer = setTimeout(() => {
+      stopped = 'time';
+      stop.abort();
+    }, limits.runMinutes * 60_000);
     try {
       const res = await run(argv.map(shellQuote).join(' '), {
-        cwd: spec.cwd, signal: ctx.signal,
+        cwd: spec.cwd, signal: AbortSignal.any([ctx.signal, stop.signal]),
         onLine: (line) => {
+          this.record?.(spec.access, line);
           const event = parseLine(this.name, line, spec.cwd, model);
           if (!event) return;
           if (event.tool) {
             ctx.log?.('oneliner', event.tool);
             spec.onTool?.(event.tool);
+            if (++turns > limits.maxTurns && !stopped) {
+              stopped = 'turns';
+              stop.abort();
+            }
           }
           if (event.text) {
             if (last) ctx.log?.('detail', last);
@@ -245,11 +268,13 @@ export class CliDriver implements Driver {
         },
       });
       ctx.signal.throwIfAborted();
+      if (stopped) throw limitError(stopped, limits);
       if (error || res.code !== 0) {
         throw new Error(`${this.name} failed${error ? `: ${error}` : ` (exit ${res.code})`}\n${res.output.trim().split('\n').slice(-5).join('\n')}`);
       }
       return last.trim();
     } finally {
+      clearTimeout(timer);
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   }

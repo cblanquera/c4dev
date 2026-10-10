@@ -56,6 +56,8 @@ test.describe('Journey: one assistant for every project', () => {
       const choose = async () => {
         await dialog.getByRole('button', { name: 'Choose…' }).click();
         const picker = page.getByRole('dialog', { name: 'Choose a folder' });
+        // Typing while the first listing loads would race it.
+        await expect(picker.getByRole('list', { name: 'Folders' }).getByRole('listitem').first()).toBeVisible();
         await picker.getByLabel('Folder path').fill(path.dirname(repo));
         await picker.getByLabel('Folder path').press('Enter');
         await picker.getByRole('list', { name: 'Folders' }).getByRole('button', { name: new RegExp(`^${path.basename(repo)}`) }).click();

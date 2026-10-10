@@ -1,6 +1,6 @@
 /** Thin typed client for the factory API. */
 import type {
-  AgentProfile, Card, CardDetail, FactoryState, Project, ProjectProcess, ProviderId, ProviderStatus, Settings, Skill, Stage, UsageTotals,
+  AgentProfile, Card, CardDetail, FactoryState, Project, ProjectProcess, ProviderId, ProviderStatus, RunLimits, Settings, Skill, Stage, UsageTotals,
 } from '../../server/types.ts';
 
 export interface FolderListing {
@@ -25,7 +25,7 @@ export interface Backups {
   backups: { name: string; path: string; bytes: number; createdAt: number }[];
 }
 
-export type ProfileInput = Pick<AgentProfile, 'name' | 'job' | 'title' | 'provider' | 'context' | 'imageUrl' | 'model' | 'skillIds'>;
+export type ProfileInput = Pick<AgentProfile, 'name' | 'job' | 'title' | 'provider' | 'context' | 'imageUrl' | 'model' | 'skillIds' | 'budgetUsd' | 'budgetTokens'>;
 
 /** This install's API token, written into the page by the server (see server/auth.ts). */
 export const API_TOKEN = document.querySelector<HTMLMetaElement>('meta[name="factory-token"]')?.content ?? '';
@@ -81,6 +81,7 @@ export const api = {
   ask: (body: string) => request<void>('POST', '/api/assistant/messages', { body }),
   refreshProviders: () => request<ProviderStatus[]>('POST', '/api/providers/refresh'),
   setProvider: (id: ProviderId, enabled: boolean) => request<ProviderStatus[]>('PATCH', `/api/providers/${id}`, { enabled }),
+  setLimits: (limits: Partial<RunLimits>) => request<RunLimits>('PATCH', '/api/limits', limits),
   exportData: () => request<unknown>('GET', '/api/export'),
   importData: (bundle: unknown) => request<SkillImport>('POST', '/api/import', bundle),
   backups: () => request<Backups>('GET', '/api/backups'),

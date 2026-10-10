@@ -5,6 +5,14 @@
  */
 import type { AssistantMessage, Card, CardKind, Comment, DeliverableKind, LogLevel, MergeState, Stage, Subtask, SubtaskKind } from '../types.ts';
 import type { RunProfile } from '../profiles.ts';
+import type { RunLimits } from '../types.ts';
+
+/** A run stopped at one of its caps: a failure like any other, so it counts toward the retry limits. */
+export function limitError(kind: 'turns' | 'time', limits: RunLimits): Error {
+  return new Error(kind === 'turns'
+    ? `Stopped after ${limits.maxTurns} turns, the limit per run (Settings → Limits)`
+    : `Stopped after ${limits.runMinutes} minutes, the limit per run (Settings → Limits)`);
+}
 
 /** Tokens and estimated cost of one run, per model. */
 export interface RunUsage {

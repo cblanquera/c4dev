@@ -70,9 +70,26 @@ export interface AgentProfile {
   /** The model on that provider; empty uses the provider's default. */
   model: string;
   skillIds: number[];
+  /** Monthly limits on this agent's runs; 0 means no limit. */
+  budgetUsd: number;
+  budgetTokens: number;
   createdAt: number;
   /** Deleted profiles are archived, so recorded activity keeps their name and picture. */
   archived: boolean;
+}
+
+/** Caps on every agent run, factory-wide. A run that hits one stops and counts as a failed attempt. */
+export interface RunLimits {
+  /** Tool calls or model turns. */
+  maxTurns: number;
+  runMinutes: number;
+}
+
+/** Usage since the start of this calendar month (server time), for budgets. */
+export interface MonthUsage {
+  since: number;
+  byProject: Record<number, UsageTotals>;
+  byProfile: Record<number, UsageTotals>;
 }
 
 /** A skill in the library: a folder with a SKILL.md and any files it uses. Content is fetched separately. */
@@ -265,6 +282,9 @@ export interface Settings {
   team: number[];
   /** Git remote to pull from and push to, when the repository has it. */
   remote: string;
+  /** Monthly limits on this project's runs; 0 means no limit. Reaching one pauses the coordinator. */
+  budgetUsd: number;
+  budgetTokens: number;
 }
 
 /** One repository with its own board, coordinator and settings. */
@@ -316,7 +336,8 @@ export type FactoryEvent =
   | { type: 'skill'; skill: Skill }
   | { type: 'skill_removed'; id: number }
   | { type: 'usage'; record: UsageRecord }
-  | { type: 'providers'; providers: ProviderStatus[] };
+  | { type: 'providers'; providers: ProviderStatus[] }
+  | { type: 'limits'; limits: RunLimits };
 
 /** Everything a client needs on (re)connect. */
 export interface FactoryState {
@@ -328,7 +349,8 @@ export interface FactoryState {
   profiles: AgentProfile[];
   skills: Skill[];
   providers: ProviderStatus[];
-  usage: { byProject: Record<number, UsageTotals>; byProfile: Record<number, UsageTotals> };
+  usage: { byProject: Record<number, UsageTotals>; byProfile: Record<number, UsageTotals>; month: MonthUsage };
+  limits: RunLimits;
 }
 
 export interface CardDetail {

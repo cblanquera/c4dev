@@ -49,6 +49,8 @@ export function run(command: string, opts: RunOptions): Promise<RunResult> {
       }
     };
     opts.signal?.addEventListener('abort', kill, { once: true });
+    // A signal aborted before the spawn never fires its event.
+    if (opts.signal?.aborted) kill();
     const timer = opts.timeoutMs ? setTimeout(kill, opts.timeoutMs) : undefined;
 
     child.on('error', (err) => {

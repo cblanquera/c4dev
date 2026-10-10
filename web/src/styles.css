@@ -249,6 +249,9 @@ textarea { resize: vertical; line-height: 1.5; }
 .provider-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toggle:disabled { opacity: 0.4; }
 .settings-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.budget-fields { display: flex; flex-direction: column; gap: 6px; }
+.budget-fields .field-hint, .budget-month { margin: 0; }
+.budget-month.is-over { color: var(--danger); font-weight: 600; }
 .data-block { display: flex; flex-direction: column; gap: 10px; }
 .data-block h3 { margin: 0; font-size: 14px; }
 .data-block .field-hint { margin: 0; overflow-wrap: anywhere; }

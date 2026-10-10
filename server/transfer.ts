@@ -11,6 +11,7 @@ import * as db from './db.ts';
 import { HttpError } from './errors.ts';
 import { assistantProfile, importSkills, saveProfile, skillDir, skillFiles } from './profiles.ts';
 import { assertUsable } from './providers.ts';
+import { cleanBudget } from './budget.ts';
 import { DATA_DIR, listProjects, pickSettings, updateProject } from './settings.ts';
 import { AGENT_JOBS, type AgentJob, type DriverName, type Settings } from './types.ts';
 
@@ -32,6 +33,8 @@ export interface ExportedAgent {
   skills: string[];
   /** The picture as a data URL. */
   image: string | null;
+  budgetUsd?: number;
+  budgetTokens?: number;
 }
 
 export interface FactoryExport {
@@ -76,6 +79,7 @@ export function exportFactory(): FactoryExport {
       name: p.name, job: p.job, title: p.title, provider: p.provider, model: p.model, context: p.context,
       skills: p.skillIds.map((id) => skillName.get(id)).filter((n): n is string => !!n),
       image: imageData(p.imageUrl),
+      budgetUsd: p.budgetUsd, budgetTokens: p.budgetTokens,
     })),
     projects: listProjects().map((p) => ({
       name: p.name,
@@ -126,6 +130,7 @@ export async function importFactory(input: unknown, hooks: ImportHooks): Promise
         name: agent.name, job: agent.job, title: agent.title, provider, model: provider === 'simulated' ? '' : agent.model, context: agent.context,
         skillIds: (agent.skills ?? []).map((n) => skillIds.get(n)).filter((id): id is number => id != null),
         imageUrl: agent.image ? hooks.saveImage(agent.image) : null,
+        budgetUsd: agent.budgetUsd ?? 0, budgetTokens: agent.budgetTokens ?? 0,
       };
       saveProfile(existing ? { ...existing, ...fields } : fields, existing?.id);
       (existing ? result.updated : result.added).push(where);
@@ -140,6 +145,8 @@ export async function importFactory(input: unknown, hooks: ImportHooks): Promise
     try {
       const { team = [], ...rest } = project.settings ?? { team: [] };
       const settings: Partial<Settings> = { ...pickSettings(rest), team: team.map((n) => agentIds.get(n)).filter((id): id is number => id != null) };
+      if (settings.budgetUsd !== undefined) settings.budgetUsd = cleanBudget(settings.budgetUsd, 'usd');
+      if (settings.budgetTokens !== undefined) settings.budgetTokens = cleanBudget(settings.budgetTokens, 'tokens');
       if (!settings.repoPath) throw new Error('no project path');
       const repoPath = path.resolve(settings.repoPath);
       const existing = listProjects().find((p) => path.resolve(p.settings.repoPath) === repoPath);

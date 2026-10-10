@@ -6,6 +6,7 @@ import { Avatar } from './Avatar.tsx';
 import { usageLine } from '../format.ts';
 import { ROLE_GROUPS, profileTitle } from '../agents.ts';
 import { FolderPicker } from './FolderPicker.tsx';
+import { BudgetFields } from './BudgetFields.tsx';
 import type { AgentProfile, Project, Settings, UsageTotals } from '../../../server/types.ts';
 
 export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
@@ -31,12 +32,14 @@ interface Props {
   defaults: Settings;
   /** Profiles to choose the team from. */
   profiles: AgentProfile[];
+  /** This project's usage since the 1st of the month. */
+  monthUsage?: UsageTotals;
   onClose: () => void;
   onSaved: (project: Project) => void;
   onError: (m: string) => void;
 }
 
-export function SettingsDialog({ project, defaults, profiles, onClose, onSaved, onError }: Props) {
+export function SettingsDialog({ project, defaults, profiles, monthUsage, onClose, onSaved, onError }: Props) {
   const [name, setName] = useState(project?.name ?? '');
   // A new project needs its own repository; the demo default would collide.
   const [draft, setDraft] = useState<Settings>(project?.settings ?? { ...defaults, repoPath: '' });
@@ -159,6 +162,12 @@ export function SettingsDialog({ project, defaults, profiles, onClose, onSaved, 
               );
             })}
             {!everyone && <button className="link small" onClick={() => set('team', [])}>Let every agent work here</button>}
+            <div className="team-group" role="group" aria-label="Monthly budget">
+              <span className="field-label">Monthly budget</span>
+              <BudgetFields id="project-budget" usd={draft.budgetUsd} tokens={draft.budgetTokens} month={monthUsage}
+                reached="the coordinator pauses and cards wait in Deliverables until you raise it"
+                onChange={({ usd, tokens }) => setDraft((d) => ({ ...d, budgetUsd: usd, budgetTokens: tokens }))} />
+            </div>
           </fieldset>}
 
           {section === 'quality' && <fieldset>

@@ -10,7 +10,7 @@ import { HttpError, backlogBlocker } from './coordinator.ts';
 import type { Factory } from './factory.ts';
 import type { Assistant } from './assistant.ts';
 import {
-  DATA_DIR, createProject, defaultSettings, getProject, listProjects, pickSettings, refreshRemote, settings, updateProject,
+  DATA_DIR, createProject, defaultSettings, getProject, listProjects, pickSettings, refreshRemote, runLimits, setRunLimits, settings, updateProject,
 } from './settings.ts';
 import { deleteSkill, importSkills, pickProfile, removeProfile, runProfile, saveProfile, saveSkill, skillContent, skillFiles } from './profiles.ts';
 import { importFromGithub, importFromSkillsSh } from './skill-import.ts';
@@ -27,6 +27,7 @@ import { deliveryNotes } from './delivery.ts';
 import { DevmetricsProcesses, type ProcessManager } from './processes.ts';
 import { guard, withToken } from './auth.ts';
 import { exportFactory, importFactory } from './transfer.ts';
+import { assertBudget, cleanBudget, monthStart } from './budget.ts';
 import { KEY_FILE } from './crypto.ts';
 
 const UPLOAD_TYPES: Record<string, string> = {
@@ -63,6 +64,8 @@ async function validateProject(name: string, patch: Partial<Settings>, selfId: n
     const known = new Set(db.activeProfiles().map((p) => p.id));
     patch.team = [...new Set(patch.team.map(Number))].filter((id) => known.has(id));
   }
+  if (patch.budgetUsd !== undefined) patch.budgetUsd = cleanBudget(patch.budgetUsd, 'usd');
+  if (patch.budgetTokens !== undefined) patch.budgetTokens = cleanBudget(patch.budgetTokens, 'tokens');
   if (patch.repoPath === undefined) return;
   // path.resolve('') is the working directory, so an empty path must be rejected first.
   if (!String(patch.repoPath).trim()) throw new HttpError(400, 'Project path is required');
@@ -76,6 +79,11 @@ async function validateProject(name: string, patch: Partial<Settings>, selfId: n
   if (listProjects().some((p) => p.id !== selfId && path.resolve(p.settings.repoPath) === patch.repoPath)) {
     throw new HttpError(409, 'Another project already uses this repository');
   }
+}
+
+function monthUsage() {
+  const since = monthStart();
+  return { since, byProject: db.usageBy('project_id', undefined, since), byProfile: db.usageBy('profile_id', undefined, since) };
 }
 
 /** Roots for every project, so background processes in any repository are listed. */
@@ -107,9 +115,14 @@ export function createApp(factory: Factory, assistant: Assistant, { token, proce
       profiles: db.listProfiles(),
       skills: db.listSkills(),
       providers: providerStatuses(),
-      usage: { byProject: db.usageBy('project_id'), byProfile: db.usageBy('profile_id') },
+      usage: { byProject: db.usageBy('project_id'), byProfile: db.usageBy('profile_id'), month: monthUsage() },
+      limits: runLimits(),
     };
     res.json(state);
+  });
+
+  app.patch('/api/limits', (req, res) => {
+    res.json(setRunLimits(req.body ?? {}));
   });
 
   app.get('/api/events', (req, res) => {
@@ -283,6 +296,7 @@ export function createApp(factory: Factory, assistant: Assistant, { token, proce
     const send = (obj: unknown) => res.write(`${JSON.stringify(obj)}\n`);
     try {
       const writer = pickProfile(project.id, 'coordinator');
+      assertBudget(project.id, writer);
       const instructions = await factory.driver(writer.provider).generateInstructions(
         { description, references, repoPath: project.settings.repoPath },
         (e) => send(e),

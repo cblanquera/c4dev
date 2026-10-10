@@ -134,3 +134,15 @@ test('the API answers only loopback hosts, with a private per-install token', ()
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('installed CLI versions are compared with the ones the parsers were checked against', async () => {
+  const { compareVersion, TESTED_VERSIONS } = await import('../server/providers.ts');
+  assert.equal(compareVersion('codex-cli 0.161.0', '0.161.0'), 'tested');
+  assert.equal(compareVersion('codex-cli 0.162.0', '0.161.0'), 'newer');
+  assert.equal(compareVersion('1.18.9', '1.18.18'), 'older', 'numbers, not strings');
+  assert.equal(compareVersion('2.0.0', '1.18.18'), 'newer');
+  assert.equal(compareVersion('dev build', '1.0.0'), 'unknown');
+  assert.equal(compareVersion(null, '1.0.0'), null);
+  assert.equal(compareVersion('2.1.294 (Claude Code)', null), null);
+  assert.deepEqual(Object.keys(TESTED_VERSIONS).sort(), ['codex', 'opencode', 'pi'], 'every CLI driver has a tested version');
+});

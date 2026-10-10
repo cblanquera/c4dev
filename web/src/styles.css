@@ -246,6 +246,8 @@ textarea { resize: vertical; line-height: 1.5; }
 .provider-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border-strong); flex: none; }
 .provider-status.is-available { color: var(--add); }
 .provider-status.is-available .provider-dot { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 20%, transparent); }
+.provider-version { display: inline-flex; align-items: flex-start; gap: 6px; color: var(--warn); overflow-wrap: anywhere; }
+.provider-version .icon { flex: none; margin-top: 2px; }
 .provider-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toggle:disabled { opacity: 0.4; }
 .settings-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }

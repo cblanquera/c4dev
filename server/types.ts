@@ -252,6 +252,10 @@ export interface ProviderStatus {
   runsWork: boolean;
   /** Model ids to suggest; empty means type any id. */
   models: string[];
+  /** The CLI version the factory's parser was checked against, or null when it doesn't read the CLI's output (Claude runs through its SDK). */
+  tested: string | null;
+  /** How the installed version compares with `tested`. */
+  versionCheck: 'tested' | 'newer' | 'older' | 'unknown' | null;
 }
 
 export interface Settings {

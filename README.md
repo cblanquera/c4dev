@@ -151,6 +151,8 @@ e2e/                Playwright acceptance tests by journey/use case, desktop + m
 
 ## Tests
 
+`npm run smoke` checks the real providers (Claude, Codex, OpenCode, Pi) in a throwaway repository with cheap models. It costs a few cents, so it's manual: run it after updating a CLI, e.g. `npm run smoke -- codex`, or `npm run smoke -- opencode --model opencode=<provider/model>`.
+
 CI runs the type check, the server tests and the browser tests on every pull request and on pushes to `main` (`.github/workflows/ci.yml`, Node 26 from `.nvmrc`).
 
 ```bash

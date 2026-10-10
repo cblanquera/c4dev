@@ -10,6 +10,7 @@ npm run dev          # API (node --watch) on :4400 + Vite UI on :5173
 npm run typecheck    # tsc over server, web, tests
 npm test             # node:test — unit + full pipeline with the simulated driver
 npm run test:e2e     # Playwright (builds first) — desktop + mobile projects
+npm run smoke        # real providers in a throwaway repo (costs a little; never in CI)
 npm run build && npm start
 ```
 
@@ -109,8 +110,8 @@ CI (`.github/workflows/ci.yml`) runs all three on Node 26 (`.nvmrc`). Without de
 
 - **Server behavior:** add to `test/factory.test.ts`, using the HTTP API with `FACTORY_SIM_SPEED=0`.
 - **UI behavior:** add a spec under `e2e/<journey>/`. Prefer role/label locators. Check that the page doesn't scroll horizontally on mobile (`expectNoHorizontalOverflow`).
-- **Real drivers:** don't add automated tests that call Claude or the agent CLIs; they cost money. Smoke-test manually with a cheap model in a throwaway repo if you change `claude.ts` or `cli.ts`, and start CLIs inside that repo (Pi has no folder flag).
-- **CLI parsers are tested on recorded output** in `test/fixtures/providers/`. When a CLI's format changes, record a new fixture from a throwaway repo rather than guessing.
+- **Real drivers:** don't add automated tests that call Claude or the agent CLIs; they cost money. If you change `claude.ts` or `cli.ts`, run `npm run smoke -- <provider>` (cheap models, a throwaway repo, and a check that read-only runs leave it untouched). After a CLI update passes, bump `TESTED_VERSIONS` in `server/providers.ts`; the Providers page warns when the installed version differs.
+- **CLI parsers are tested on recorded output** in `test/fixtures/providers/`. When a CLI's format changes, record new output with `npm run smoke -- <provider> --record` (saved under `test-results/fixtures/`) and update the fixtures and parsers together, rather than guessing.
 
 ## Don'ts
 

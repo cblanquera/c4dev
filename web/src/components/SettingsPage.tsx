@@ -103,6 +103,17 @@ function LimitsSection({ limits, onError }: { limits: RunLimits; onError: (m: st
   );
 }
 
+/** Whether the installed CLI is the version the factory reads correctly. */
+function VersionNote({ provider: p }: { provider: ProviderStatus }) {
+  if (p.versionCheck === 'tested') return <span className="muted small">Tested with this version.</span>;
+  const how = p.versionCheck === 'newer' ? 'newer than' : p.versionCheck === 'older' ? 'older than' : "a version we can't compare with";
+  return (
+    <span className="small provider-version">
+      <Icon name="circle-alert" size={12} /> This is {how} the tested {p.tested}. Its output may differ: if runs fail, check it with <code>npm run smoke -- {p.id}</code>.
+    </span>
+  );
+}
+
 /** The agent CLIs on this machine: installed or not, and switched on or off. */
 function ProvidersSection({ providers, onError }: { providers: ProviderStatus[]; onError: (m: string) => void }) {
   const [checking, setChecking] = useState(false);
@@ -146,6 +157,7 @@ function ProvidersSection({ providers, onError }: { providers: ProviderStatus[];
                 {p.available ? `Available · ${p.version ?? 'installed'}` : `Not installed: ${p.command} wasn't found`}
               </span>
               {p.path && <span className="muted small mono provider-path">{p.path}</span>}
+              {p.available && p.versionCheck && <VersionNote provider={p} />}
             </div>
             <button className={`toggle ${p.enabled ? 'on' : ''}`} role="switch" aria-checked={p.enabled} aria-label={`Use ${p.label}`}
               title={!p.available && !p.enabled ? `${p.label} isn't installed` : p.enabled ? `Switch ${p.label} off` : `Switch ${p.label} on`}

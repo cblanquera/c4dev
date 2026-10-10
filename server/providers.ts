@@ -11,6 +11,13 @@ import { CLAUDE_MODELS } from './settings.ts';
 import { PROVIDERS, PROVIDER_LABELS, WORK_PROVIDERS, type DriverName, type ProviderId, type ProviderStatus } from './types.ts';
 
 const COMMANDS: Record<ProviderId, string> = { claude: 'claude', codex: 'codex', opencode: 'opencode', pi: 'pi' };
+/**
+ * CLI versions whose output the parsers in agents/cli.ts were checked against
+ * with `npm run smoke` (and recorded in test/fixtures/providers). Claude runs
+ * through the Agent SDK pinned in package-lock.json, so its CLI isn't read.
+ * Update these after a smoke run passes on a new version.
+ */
+export const TESTED_VERSIONS: Partial<Record<ProviderId, string>> = { codex: '0.161.0', opencode: '1.18.18', pi: '0.84.2' };
 /** Settings keys share the key/value table, so they're prefixed. */
 const KEY = (id: ProviderId) => `provider.${id}.enabled`;
 const PROBE_MS = 8_000;
@@ -18,7 +25,19 @@ const PROBE_MS = 8_000;
 let statuses: ProviderStatus[] = PROVIDERS.map((id) => ({
   id, label: PROVIDER_LABELS[id], command: COMMANDS[id], available: false, version: null, path: null,
   enabled: id === 'claude', runsWork: WORK_PROVIDERS.includes(id), models: id === 'claude' ? CLAUDE_MODELS : [],
+  tested: TESTED_VERSIONS[id] ?? null, versionCheck: null,
 }));
+
+const semver = (text: string | null) => text?.match(/(\d+)\.(\d+)\.(\d+)/)?.slice(1).map(Number) ?? null;
+
+/** How an installed version (e.g. "codex-cli 0.162.1") compares with the tested one. */
+export function compareVersion(installed: string | null, tested: string | null): ProviderStatus['versionCheck'] {
+  if (!tested || !installed) return null;
+  const [a, b] = [semver(installed), semver(tested)];
+  if (!a || !b) return 'unknown';
+  const diff = a.map((n, i) => n - b[i]).find((d) => d !== 0) ?? 0;
+  return diff === 0 ? 'tested' : diff > 0 ? 'newer' : 'older';
+}
 
 function enabledFlags(): Record<ProviderId, boolean> {
   const stored = db.loadSettings();
@@ -57,11 +76,13 @@ async function probe(id: ProviderId, enabled: boolean): Promise<ProviderStatus> 
   const command = COMMANDS[id];
   const where = await run(`command -v ${shellQuote(command)}`, { cwd: process.cwd(), timeoutMs: PROBE_MS });
   const path = where.code === 0 ? where.output.trim().split('\n')[0] || null : null;
-  const version = path ? (await run(`${shellQuote(command)} --version`, { cwd: process.cwd(), timeoutMs: PROBE_MS })) : null;
+  const res = path ? (await run(`${shellQuote(command)} --version`, { cwd: process.cwd(), timeoutMs: PROBE_MS })) : null;
+  const version = res?.code === 0 ? res.output.trim().split('\n')[0].slice(0, 120) || null : null;
+  const tested = TESTED_VERSIONS[id] ?? null;
   return {
-    id, label: PROVIDER_LABELS[id], command, available: !!path, path,
-    version: version?.code === 0 ? version.output.trim().split('\n')[0].slice(0, 120) || null : null,
+    id, label: PROVIDER_LABELS[id], command, available: !!path, path, version,
     enabled, runsWork: WORK_PROVIDERS.includes(id), models: path ? await listModels(id) : id === 'claude' ? CLAUDE_MODELS : [],
+    tested, versionCheck: compareVersion(version, tested),
   };
 }
 

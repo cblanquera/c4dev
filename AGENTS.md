@@ -15,6 +15,8 @@ npm run build && npm start
 
 Before you finish a change, run `npm run typecheck` and `npm test`. If you touched anything under `web/` or the API, also run `npm run test:e2e`.
 
+CI (`.github/workflows/ci.yml`) runs all three on Node 26 (`.nvmrc`). Without devmetrics, `test:e2e` starts the server itself on a free port when `CI` is set; locally it always goes through devmetrics.
+
 ## Layout
 
 | Path | Responsibility |

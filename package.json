@@ -4,6 +4,9 @@
   "description": "Software factory: a kanban board where a coordinator agent plans, builds, verifies and accepts work with worker agents in git worktrees.",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=26"
+  },
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "server": "node --watch server/index.ts",

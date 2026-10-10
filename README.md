@@ -151,6 +151,8 @@ e2e/                Playwright acceptance tests by journey/use case, desktop + m
 
 ## Tests
 
+CI runs the type check, the server tests and the browser tests on every pull request and on pushes to `main` (`.github/workflows/ci.yml`, Node 26 from `.nvmrc`).
+
 ```bash
 npm test            # unit + full pipeline over the API with the simulated driver
 npm run test:e2e    # Playwright: authoring, delivery, human hand-off, abort; desktop + mobile

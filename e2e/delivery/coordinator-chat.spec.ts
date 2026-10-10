@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../helpers.ts';
 import { createCard, expectNoHorizontalOverflow, column } from '../helpers.ts';
 
 test('completed cards include review instructions, answer questions and draft follow-up work', async ({ page, request }) => {

@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../helpers.ts';
 import { expectNoHorizontalOverflow } from '../helpers.ts';
 
 test('background process popover refreshes and stops only the selected project server', async ({ page }) => {

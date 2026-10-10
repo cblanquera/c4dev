@@ -1,4 +1,18 @@
-import { expect, type Page } from '@playwright/test';
+import { expect, test as base, type Page } from '@playwright/test';
+
+export { expect };
+
+/** The acceptance server's API token, from scripts/test-e2e.mjs. Pages get it from index.html like any user. */
+const TOKEN = process.env.FACTORY_TOKEN ?? '';
+
+/** Specs' direct API calls carry the token; the browser's own requests don't get it added. */
+export const test = base.extend({
+  request: async ({ playwright, baseURL }, use) => {
+    const request = await playwright.request.newContext({ baseURL, extraHTTPHeaders: { 'x-factory-token': TOKEN } });
+    await use(request);
+    await request.dispose();
+  },
+});
 
 export const isMobile = (page: Page) => (page.viewportSize()?.width ?? 1000) < 760;
 

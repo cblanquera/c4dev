@@ -9,6 +9,7 @@ import { ensureDemoRepo } from './git.ts';
 import { Factory } from './factory.ts';
 import { Assistant } from './assistant.ts';
 import { createApp } from './app.ts';
+import { loadToken } from './auth.ts';
 import { ClaudeDriver } from './agents/claude.ts';
 import { CliDriver } from './agents/cli.ts';
 import { SimulatedDriver } from './agents/simulated.ts';
@@ -40,7 +41,7 @@ function driverFor(provider: DriverName): Driver {
 const factory = new Factory(driverFor);
 // The assistant is the Chief of Staff profile, running on that profile's provider.
 const assistant = new Assistant(factory, () => driverFor(assistantProfile().provider));
-const app = createApp(factory, assistant);
+const app = createApp(factory, assistant, { token: loadToken(DATA_DIR) });
 const server = app.listen(PORT, '127.0.0.1', () => {
   console.log(`Software factory on http://localhost:${PORT} (${listProjects().map((p) => p.name).join(', ')})`);
 });

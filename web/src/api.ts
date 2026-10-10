@@ -21,10 +21,14 @@ export interface SkillImport {
 
 export type ProfileInput = Pick<AgentProfile, 'name' | 'job' | 'title' | 'provider' | 'context' | 'imageUrl' | 'model' | 'skillIds'>;
 
+/** This install's API token, written into the page by the server (see server/auth.ts). */
+export const API_TOKEN = document.querySelector<HTMLMetaElement>('meta[name="factory-token"]')?.content ?? '';
+const AUTH = { 'x-factory-token': API_TOKEN };
+
 async function request<T>(method: string, url: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(url, {
     method,
-    headers: body !== undefined ? { 'content-type': 'application/json' } : undefined,
+    headers: body !== undefined ? { ...AUTH, 'content-type': 'application/json' } : AUTH,
     body: body !== undefined ? JSON.stringify(body) : undefined,
     signal,
   });
@@ -74,7 +78,7 @@ export const api = {
   folders: (path: string, hidden: boolean) => request<FolderListing>('GET', `/api/fs/dirs?path=${encodeURIComponent(path)}${hidden ? '&hidden=1' : ''}`),
 
   async upload(file: File): Promise<string> {
-    const res = await fetch('/api/uploads', { method: 'POST', headers: { 'content-type': file.type }, body: file });
+    const res = await fetch('/api/uploads', { method: 'POST', headers: { ...AUTH, 'content-type': file.type }, body: file });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error ?? 'Upload failed');
     return data.url;
@@ -90,7 +94,7 @@ export const api = {
   ): Promise<{ instructions: string; hash: string }> {
     const res = await fetch('/api/instructions', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...AUTH, 'content-type': 'application/json' },
       body: JSON.stringify({ description, projectId, cardId }),
       signal,
     });

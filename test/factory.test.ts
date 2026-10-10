@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
-import type { Server } from 'node:http';
+import http, { type Server } from 'node:http';
 
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-test-'));
 process.env.FACTORY_DATA = dataDir;
@@ -28,6 +28,7 @@ const { git } = await import('../server/shell.ts');
 
 let server: Server;
 let base: string;
+const token = 'test-token-0123456789abcdef0123456789abcdef';
 let factory: InstanceType<typeof Factory>;
 let assistant: InstanceType<typeof Assistant>;
 /** The demo project created on first start. */
@@ -41,7 +42,7 @@ let managedProcesses = [
 ];
 
 async function api(method: string, url: string, body?: unknown) {
-  const res = await fetch(base + url, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const res = await fetch(base + url, { method, headers: { 'content-type': 'application/json', 'x-factory-token': token }, body: body ? JSON.stringify(body) : undefined });
   const text = await res.text();
   return { status: res.status, body: text ? JSON.parse(text.split('\n').filter(Boolean).at(-1)!) : null, raw: text };
 }
@@ -113,7 +114,7 @@ before(async () => {
     managedProcesses = managedProcesses.filter((item) => String(item.port) !== args[1]);
     return '';
   });
-  server = createApp(factory, assistant, processes).listen(0);
+  server = createApp(factory, assistant, { token, processes }).listen(0);
   base = `http://localhost:${(server.address() as AddressInfo).port}`;
   factory.start();
   assistant.start();
@@ -125,6 +126,31 @@ after(async () => {
   server.close();
   db.closeDb();
   fs.rmSync(dataDir, { recursive: true, force: true });
+});
+
+test('only this install\'s own page can use the API', async () => {
+  const call = (url: string, headers: Record<string, string>, method = 'GET') => fetch(base + url, { method, headers });
+  assert.equal((await call('/api/state', {})).status, 401, 'no token');
+  assert.equal((await call('/api/state', { 'x-factory-token': 'wrong' })).status, 401);
+  assert.equal((await call('/api/state', { 'x-factory-token': token })).status, 200);
+  // EventSource can't send headers, so only the event stream takes the token in the URL.
+  assert.equal((await call(`/api/state?token=${token}`, {})).status, 401);
+  const events = new AbortController();
+  const stream = await fetch(`${base}/api/events?token=${token}`, { signal: events.signal });
+  assert.equal(stream.status, 200);
+  events.abort();
+  // DNS rebinding: a site's own name pointing at this machine. (fetch won't send a custom Host.)
+  const rebound = await new Promise<number>((resolve, reject) => {
+    http.get(`${base}/api/state`, { headers: { 'x-factory-token': token, host: 'evil.example:4400' } }, (res) => { res.resume(); resolve(res.statusCode!); }).on('error', reject);
+  });
+  assert.equal(rebound, 403);
+  // Pages on other sites, even other localhost ports.
+  assert.equal((await call('/api/projects', { 'x-factory-token': token, origin: 'https://evil.example' }, 'POST')).status, 403);
+  assert.equal((await call('/api/state', { 'x-factory-token': token, origin: 'http://localhost:3999' })).status, 403);
+  assert.equal((await call('/api/state', { 'x-factory-token': token, 'sec-fetch-site': 'cross-site' })).status, 403);
+  assert.equal((await call('/api/state', { 'x-factory-token': token, 'sec-fetch-site': 'same-site' })).status, 403);
+  const own = new URL(base).host;
+  assert.equal((await call('/api/state', { 'x-factory-token': token, origin: `http://${own}`, 'sec-fetch-site': 'same-origin' })).status, 200);
 });
 
 test('cards need current instructions before entering the backlog', async () => {

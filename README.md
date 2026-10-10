@@ -143,6 +143,7 @@ e2e/                Playwright acceptance tests by journey/use case, desktop + m
 
 - **Node 24+** (developed on 26). TypeScript runs directly through Node's type stripping, with no build step for the server.
 - State lives in `.factory/` (database, uploads, worktrees). Set `FACTORY_DATA` to move it and `PORT` to change the port.
+- Only the factory's own page can use its API: requests must be addressed to localhost, can't come from other sites, and need the token in `.factory/auth-token`, which the page receives automatically. To script the API, send that token as the `X-Factory-Token` header.
 - Each agent call is a separate Agent SDK session with the right working directory and tool permissions: the planner and auditor are read-only; workers get `log_activity` and `request_human_input` tools.
 - The default model is `claude-opus-5-5` for every role, configurable per role in Settings.
 

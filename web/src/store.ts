@@ -1,6 +1,6 @@
 /** Live factory state for every project and the assistant, kept in sync with the server over SSE. */
 import { useEffect, useMemo, useReducer, useRef } from 'react';
-import { api } from './api.ts';
+import { API_TOKEN, api } from './api.ts';
 import type {
   AgentProfile, AssistantState, Card, CardDetail, FactoryEvent, FactoryState, Project, ProviderStatus, Settings, Skill, UsageRecord, UsageTotals,
 } from '../../server/types.ts';
@@ -145,7 +145,7 @@ export function useFactory(openCardId: number | null) {
     let source: EventSource | null = null;
     let cancelled = false;
     const connect = () => {
-      source = new EventSource('/api/events');
+      source = new EventSource(`/api/events?token=${encodeURIComponent(API_TOKEN)}`);
       source.onopen = async () => {
         dispatch({ type: 'connected', value: true });
         // Resync on (re)connect so nothing missed while offline lingers.

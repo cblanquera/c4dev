@@ -1,4 +1,5 @@
-import { expect, test, type Page } from '@playwright/test';
+import type { Page } from '@playwright/test';
+import { expect, test } from '../helpers.ts';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -122,11 +123,14 @@ test.describe('Journey: one assistant for every project', () => {
     await expect(column(page, 'Complete').locator(`[data-card-id="${id}"]`)).toBeVisible();
   });
 
-  test('a quick ask summarises every project at a high level', async ({ page }) => {
+  test('a quick ask summarises every project at a high level', async ({ page, request }) => {
     await page.goto('/');
-    const before = await conversation(page).locator('.bubble.from-assistant.k-message').count();
-    await page.getByRole('button', { name: 'Status', exact: true }).click();
+    // Counted from the server: the page may still be loading the conversation.
+    const state = await (await request.get('/api/state')).json();
+    const before = state.assistant.messages.filter((m: { author: string; kind: string }) => m.author === 'assistant' && m.kind === 'message').length;
     const replies = conversation(page).locator('.bubble.from-assistant.k-message');
+    await expect(replies).toHaveCount(before);
+    await page.getByRole('button', { name: 'Status', exact: true }).click();
     await expect(replies).toHaveCount(before + 1);
     await expect(replies.last()).toContainText('Demo project');
     await expectNoHorizontalOverflow(page);

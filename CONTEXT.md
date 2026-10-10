@@ -69,6 +69,7 @@ Two goals shape most decisions:
 - **Secrets are first-class.** Workers can ask for credentials. Values are stored locally, injected as environment variables, and never shown back or logged.
 - **A simulated driver ships with it**, so the whole flow can be explored and tested without spending tokens. It makes real commits, merges and diffs.
 - **Local-first.** It is a single Node process with SQLite, SSE for live updates, and no external services beyond the model API.
+- **Only this machine's own UI can use the API.** Listening on 127.0.0.1 doesn't stop websites in the browser from sending requests to localhost, and the API can list folders, start agents with write access and accept secrets. So every request must be addressed to a loopback host (no DNS rebinding), nothing may come from another origin (`Origin`, `Sec-Fetch-Site`; pages can still be opened from a link), and the API needs this install's token from `.factory/auth-token` (mode 600). The server writes the token into `index.html`, as Vite does in development (with CORS off, so other localhost pages can't read it). The client sends it as `X-Factory-Token`; only the event stream takes it as `?token=`, because EventSource can't send headers. Uploads need no token but can't be fetched from other sites.
 - **Managed local servers.** Development and review servers run through devmetrics on assigned localhost ports 3000–3020, with a scheduled stop. Acceptance tests use a managed server and isolated temporary data, then stop it and remove that data.
 
 ## Agent permissions

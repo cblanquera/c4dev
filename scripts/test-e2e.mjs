@@ -24,10 +24,12 @@ try {
     '--', 'PORT={port} node server/index.ts',
   ], { encoding: 'utf8', env: { ...process.env, FACTORY_DATA: dataDir, FACTORY_SIM_SPEED: '0.15' } }));
   console.log(`Acceptance server: ${server.url} (expires ${server.stopsAt}; stopped when tests finish)`);
-  const ready = await fetch(`${server.url}/api/state`);
+  // The server creates its API token on startup; specs' direct API calls need it.
+  const token = fs.readFileSync(path.join(dataDir, 'auth-token'), 'utf8').trim();
+  const ready = await fetch(`${server.url}/api/state`, { headers: { 'x-factory-token': token } });
   if (!ready.ok) throw new Error(`Acceptance server returned ${ready.status}`);
   runner = spawn('npx', ['playwright', 'test', ...process.argv.slice(2)], {
-    stdio: 'inherit', env: { ...process.env, PLAYWRIGHT_BASE_URL: server.url },
+    stdio: 'inherit', env: { ...process.env, PLAYWRIGHT_BASE_URL: server.url, FACTORY_TOKEN: token },
   });
   process.exitCode = await new Promise((resolve, reject) => {
     runner.once('error', reject);

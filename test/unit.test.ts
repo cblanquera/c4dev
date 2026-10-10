@@ -2,6 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { judgeCoverage, parseCoverage } from '../server/coverage.ts';
 import { deriveTitle, parseTags } from '../server/db.ts';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { isLoopbackHost, loadToken, withToken } from '../server/auth.ts';
 
 test('parseCoverage reads common reporters', () => {
   assert.equal(parseCoverage('# all files | 92.31 | 85.00 | 100.00 |'), 92.31);
@@ -114,4 +118,19 @@ test('the simulated assistant answers status, lists and card questions', () => {
   assert.match(reply('Shop?').reply, /^- \*\*Shop\*\*: nothing in flight$/);
   assert.deepEqual(reply('tell me more about it', [said('assistant', 'Done.', [4])]).cardIds, [4]);
   assert.match(reply('what is the meaning of life').reply, /simulated assistant[\s\S]*Create a task in Demo project/);
+});
+
+test('the API answers only loopback hosts, with a private per-install token', () => {
+  for (const host of ['localhost', 'localhost:4400', '127.0.0.1:5173', '[::1]:4400', 'LOCALHOST']) assert.ok(isLoopbackHost(host), host);
+  for (const host of [undefined, '', 'evil.example', 'localhost.evil.example', '127.0.0.1.nip.io', '10.0.0.2:4400']) assert.ok(!isLoopbackHost(host), String(host));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-auth-'));
+  try {
+    const token = loadToken(dir);
+    assert.ok(token.length >= 32);
+    assert.equal(loadToken(dir), token, 'stable across restarts');
+    if (process.platform !== 'win32') assert.equal(fs.statSync(path.join(dir, 'auth-token')).mode & 0o777, 0o600);
+    assert.match(withToken('<html><head><title>x</title></head></html>', token), new RegExp(`<meta name="factory-token" content="${token}" />\\n</head>`));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

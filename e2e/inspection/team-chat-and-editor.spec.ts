@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../helpers.ts';
 import type { Card, CardDetail, LogEntry, Subtask } from '../../server/types.ts';
 import { expectNoHorizontalOverflow } from '../helpers.ts';
 

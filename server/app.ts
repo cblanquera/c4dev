@@ -24,6 +24,7 @@ import { assertRepo } from './git.ts';
 import { STAGES, type CardDetail, type FactoryState, type Settings, type Stage } from './types.ts';
 import { deliveryNotes } from './delivery.ts';
 import { DevmetricsProcesses, type ProcessManager } from './processes.ts';
+import { guard, withToken } from './auth.ts';
 
 const UPLOAD_TYPES: Record<string, string> = {
   'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp', 'image/svg+xml': '.svg',
@@ -77,8 +78,16 @@ async function validateProject(name: string, patch: Partial<Settings>, selfId: n
 /** Roots for every project, so background processes in any repository are listed. */
 const projectRoots = () => [process.cwd(), ...listProjects().map((p) => p.settings.repoPath), path.join(DATA_DIR, 'worktrees')];
 
-export function createApp(factory: Factory, assistant: Assistant, processes: ProcessManager = new DevmetricsProcesses(projectRoots)) {
+interface AppOptions {
+  /** This install's API token (see auth.ts). */
+  token: string;
+  processes?: ProcessManager;
+}
+
+export function createApp(factory: Factory, assistant: Assistant, { token, processes = new DevmetricsProcesses(projectRoots) }: AppOptions) {
   const app = express();
+  app.disable('x-powered-by');
+  app.use(guard(token));
   const uploadsDir = path.join(DATA_DIR, 'uploads');
   fs.mkdirSync(uploadsDir, { recursive: true });
 
@@ -443,8 +452,13 @@ export function createApp(factory: Factory, assistant: Assistant, processes: Pro
 
   const dist = path.resolve('dist');
   if (fs.existsSync(dist)) {
-    app.use(express.static(dist));
-    app.get(/^(?!\/api\/).*/, (_req, res) => res.sendFile(path.join(dist, 'index.html')));
+    // index.html carries the token, so it's never served from cache or without it.
+    const page = (_req: Request, res: Response) => {
+      res.set('Cache-Control', 'no-store').type('html').send(withToken(fs.readFileSync(path.join(dist, 'index.html'), 'utf8'), token));
+    };
+    app.get(['/', '/index.html'], page);
+    app.use(express.static(dist, { index: false }));
+    app.get(/^(?!\/api\/).*/, page);
   }
 
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {

@@ -27,6 +27,7 @@ Before you finish a change, run `npm run typecheck` and `npm test`. If you touch
 | `server/providers.ts` | Agent CLIs on this machine (detection, on/off) and `assertUsable` for every driver choice. |
 | `server/skill-import.ts` | Importing skills from GitHub and skills.sh (shallow clone, then scan for SKILL.md). |
 | `server/errors.ts` | `HttpError`. |
+| `server/auth.ts` | The API guard: loopback hosts only, no other origins, and the per-install token written into `index.html`. |
 | `server/coordinator.ts` | The state machine for one project. The only code that moves cards past the Backlog. |
 | `server/assistant.ts` | The cross-project assistant: validates and performs its actions, posts notifications and relays. |
 | `server/app.ts` | REST + SSE. The rules for manual moves (Icebox ⇄ Backlog) live here. |
@@ -94,6 +95,7 @@ Before you finish a change, run `npm run typecheck` and `npm test`. If you touch
 - **Playwright projects share one server and database**, including the one assistant conversation. Make test data unique per project (e.g. include `test.info().project.name`).
 - **`/` is the home screen now.** Board specs start at `DEMO_BOARD` (`/#project-1`), the demo project every fresh factory creates.
 - **Assistant notifications are deferred one tick** so the coordinator's question, posted right after a card moves, is included. Tests should poll for them.
+- **Every API call needs the install's token.** The UI reads it from the page (`API_TOKEN` in `web/src/api.ts`); add `AUTH` to any new `fetch`. Server tests pass it to `createApp`; e2e specs import `test` from `e2e/helpers.ts` so `request` carries it. Node's `fetch` ignores a custom `Host` header; use `node:http` to test one.
 - **HTML5 drag & drop doesn't work on touch.** Every drag action needs a button equivalent (e.g. "Move to Backlog").
 
 ## Testing guidance

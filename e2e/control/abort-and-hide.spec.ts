@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../helpers.ts';
 import { column, createCard } from '../helpers.ts';
 
 test.describe('Journey: controlling work', () => {

@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../helpers.ts';
 import { createCard, column, expectNoHorizontalOverflow, tile } from '../helpers.ts';
 
 test.describe('Journey: authoring a card', () => {

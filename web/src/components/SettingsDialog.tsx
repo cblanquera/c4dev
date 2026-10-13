@@ -1,12 +1,14 @@
 /** Project configuration: target repo, agents, team and quality gates. */
 import { Icon } from './Icon.tsx';
-import { useEffect, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { api } from '../api.ts';
 import { Avatar } from './Avatar.tsx';
 import { usageLine } from '../format.ts';
 import { ROLE_GROUPS, profileTitle } from '../agents.ts';
-import { FolderPicker } from './FolderPicker.tsx';
+import { useChooseFolder } from './FolderPicker.tsx';
+import { ProjectLogo } from './ProjectLogo.tsx';
 import { BudgetFields } from './BudgetFields.tsx';
+import { UsageReport } from './UsageReport.tsx';
 import type { AgentProfile, Project, Settings, UsageTotals } from '../../../server/types.ts';
 
 export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
@@ -19,7 +21,7 @@ export function Field({ label, hint, children }: { label: string; hint?: string;
   );
 }
 
-type Section = 'project' | 'team' | 'quality';
+type Section = 'project' | 'team' | 'quality' | 'usage';
 const SECTIONS: { id: Section; label: string }[] = [
   { id: 'project', label: 'Project' },
   { id: 'team', label: 'Team' },
@@ -34,18 +36,34 @@ interface Props {
   profiles: AgentProfile[];
   /** This project's usage since the 1st of the month. */
   monthUsage?: UsageTotals;
+  /** Changes whenever a run is recorded, so the Usage section refreshes. */
+  usageVersion?: number;
   onClose: () => void;
   onSaved: (project: Project) => void;
   onError: (m: string) => void;
 }
 
-export function SettingsDialog({ project, defaults, profiles, monthUsage, onClose, onSaved, onError }: Props) {
+export function SettingsDialog({ project, defaults, profiles, monthUsage, usageVersion = 0, onClose, onSaved, onError }: Props) {
+  // A new project has no usage yet.
+  const sections = project ? [...SECTIONS, { id: 'usage' as const, label: 'Usage' }] : SECTIONS;
   const [name, setName] = useState(project?.name ?? '');
   // A new project needs its own repository; the demo default would collide.
   const [draft, setDraft] = useState<Settings>(project?.settings ?? { ...defaults, repoPath: '' });
   const [saving, setSaving] = useState(false);
   const [section, setSection] = useState<Section>('project');
-  const [picking, setPicking] = useState(false);
+  const folders = useChooseFolder((path) => set('repoPath', path), onError);
+  const logoInput = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+  async function uploadLogo(file: File) {
+    setUploading(true);
+    try {
+      set('logoUrl', await api.upload(file));
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Upload failed');
+    } finally {
+      setUploading(false);
+    }
+  }
   const missing = !name.trim() || !draft.repoPath.trim();
   const [teamUsage, setTeamUsage] = useState<Record<number, UsageTotals>>({});
   useEffect(() => {
@@ -82,8 +100,8 @@ export function SettingsDialog({ project, defaults, profiles, monthUsage, onClos
   function onNavKey(e: KeyboardEvent<HTMLElement>) {
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
     e.preventDefault();
-    const i = SECTIONS.findIndex((x) => x.id === section);
-    const next = SECTIONS[(i + (e.key === 'ArrowDown' ? 1 : SECTIONS.length - 1)) % SECTIONS.length].id;
+    const i = sections.findIndex((x) => x.id === section);
+    const next = sections[(i + (e.key === 'ArrowDown' ? 1 : sections.length - 1)) % sections.length].id;
     setSection(next);
     document.getElementById(`settings-tab-${next}`)?.focus();
   }
@@ -97,7 +115,7 @@ export function SettingsDialog({ project, defaults, profiles, monthUsage, onClos
         </header>
         <div className="settings-layout">
           <nav className="settings-nav" role="tablist" aria-orientation="vertical" aria-label="Settings sections" onKeyDown={onNavKey}>
-            {SECTIONS.map((x) => (
+            {sections.map((x) => (
               <button key={x.id} id={`settings-tab-${x.id}`} role="tab" aria-selected={section === x.id} aria-controls="settings-panel"
                 tabIndex={section === x.id ? 0 : -1} className={section === x.id ? 'active' : ''} onClick={() => setSection(x.id)}>{x.label}</button>
             ))}
@@ -109,10 +127,28 @@ export function SettingsDialog({ project, defaults, profiles, monthUsage, onClos
                 <input value={name} onChange={(e) => setName(e.target.value)} autoFocus={!project} />
               </Field>
               <div className="field">
+                <span className="field-label" id="project-logo-label">Logo</span>
+                <div className="logo-field">
+                  <span className="logo-preview"><ProjectLogo url={draft.logoUrl} name={name || 'Project'} size={44} /></span>
+                  <div className="logo-inputs">
+                    <div className="path-row">
+                      <input className="mono" aria-labelledby="project-logo-label" aria-describedby="project-logo-hint" placeholder="https://example.com/logo.png"
+                        value={draft.logoUrl.startsWith('/uploads/') ? '' : draft.logoUrl} onChange={(e) => set('logoUrl', e.target.value)} />
+                      <button type="button" className="secondary" disabled={uploading} onClick={() => logoInput.current?.click()}>
+                        <Icon name="image-plus" size={14} /> {uploading ? 'Uploading…' : 'Upload'}
+                      </button>
+                      {draft.logoUrl && <button type="button" className="ghost" onClick={() => set('logoUrl', '')}>Remove</button>}
+                    </div>
+                    <span className="field-hint" id="project-logo-hint">{draft.logoUrl.startsWith('/uploads/') ? 'Using an uploaded image. ' : ''}Upload an image or paste a link to one. Shown on the board and the home screen; empty uses the factory's mark.</span>
+                    <input ref={logoInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml" hidden aria-label="Logo image" onChange={(e) => { const f = e.target.files?.[0]; if (f) void uploadLogo(f); e.target.value = ''; }} />
+                  </div>
+                </div>
+              </div>
+              <div className="field">
                 <label className="field-label" htmlFor="project-path">Project path</label>
                 <div className="path-row">
                   <input id="project-path" className="mono" aria-describedby="project-path-hint" value={draft.repoPath} onChange={(e) => set('repoPath', e.target.value)} />
-                  <button type="button" className="secondary" onClick={() => setPicking(true)}>Choose…</button>
+                  <button type="button" className="secondary" disabled={folders.busy} onClick={() => folders.choose(draft.repoPath, 'Choose the project folder')}>{folders.busy ? 'Choosing…' : 'Choose…'}</button>
                 </div>
                 <span className="field-hint" id="project-path-hint">The project's git repository. Worktrees are created next to the factory data, not inside it.</span>
               </div>
@@ -191,6 +227,11 @@ export function SettingsDialog({ project, defaults, profiles, monthUsage, onClos
                 <Field label="Keep Complete visible (days)"><input min={1} max={365} {...num('completeRetentionDays')} /></Field>
               </div>
             </fieldset>}
+
+            {section === 'usage' && project && <fieldset>
+              <legend>Usage</legend>
+              <UsageReport projectId={project.id} version={usageVersion} onError={onError} />
+            </fieldset>}
           </div>
         </div>
         <footer className="modal-foot">
@@ -198,7 +239,7 @@ export function SettingsDialog({ project, defaults, profiles, monthUsage, onClos
           <button className="secondary" onClick={onClose}>Cancel</button>
           <button className="primary" disabled={saving || missing} onClick={save}>{project ? 'Save settings' : 'Create project'}</button>
         </footer>
-        {picking && <FolderPicker start={draft.repoPath} onClose={() => setPicking(false)} onChoose={(path) => { set('repoPath', path); setPicking(false); }} />}
+        {folders.picker}
       </div>
     </div>
   );

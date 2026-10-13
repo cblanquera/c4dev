@@ -19,6 +19,9 @@ import type { Factory } from './factory.ts';
 import type { AgentContext, AssistantAction, Driver, ProjectDigest } from './agents/driver.ts';
 import type { AgentProfile, AssistantMessage, Card, Comment, FactoryEvent, Stage } from './types.ts';
 import { assertBudget } from './budget.ts';
+import { statusIntentByJev } from './decisions.ts';
+import { statusReport } from './agents/simulated-assistant.ts';
+import { STATUS_QUESTION } from './types.ts';
 
 /** Messages of history the agent sees. */
 const HISTORY = 30;
@@ -121,6 +124,15 @@ export class Assistant {
   }
 
   private async respond(signal: AbortSignal): Promise<void> {
+    // Status needs no model: the Status button always, and other status questions when Jev recognises them.
+    const message = db.listAssistantMessages(HISTORY).filter((m) => m.author === 'user').at(-1)?.body.trim() ?? '';
+    const projects = this.digest();
+    const status = message === STATUS_QUESTION ? { projectId: null } : await statusIntentByJev(message, projects, { projectId: null, cardId: null }, signal);
+    signal.throwIfAborted();
+    if (status) {
+      const report = statusReport(projects, status.projectId);
+      return this.post('message', report.reply, this.previews(report.cardIds));
+    }
     const result = await this.driver().assist(
       { conversation: db.listAssistantMessages(HISTORY), projects: this.digest(), cardDetails: (id) => this.cardDetails(id) },
       { signal, log: () => {}, ...this.runAs(assistantProfile(), null, null) },

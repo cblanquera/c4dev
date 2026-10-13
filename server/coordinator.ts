@@ -20,6 +20,7 @@ import {
 import { run, tail } from './shell.ts';
 import { defaultModel, getProject, settings, updateSettings } from './settings.ts';
 import { BudgetError, agentOverBudget, assertBudget, projectOverBudget } from './budget.ts';
+import { approvalByJev, singleChangeByJev } from './decisions.ts';
 import { workerPrompt } from './prompts.ts';
 import { deliveryNotes } from './delivery.ts';
 import { HttpError } from './errors.ts';
@@ -361,7 +362,13 @@ export class Coordinator {
 
     if (!db.listSubtasks(card.id).some((s) => s.status === 'pending')) {
       const refs = card.tags.map((id) => db.getCard(id)).filter((c): c is Card => !!c);
-      const plan = await this.driverOf(this.lead()).plan({ card, references: refs, repoPath: worktree }, this.ctx(card.id, null, 'coordinator', signal));
+      // With Jev, a small self-contained card skips the planning run: one worker does it all.
+      const single = !refs.length && await singleChangeByJev(card, { projectId: this.projectId, cardId: card.id }, signal);
+      if (signal.aborted) throw new AbortError();
+      if (single) this.log(card, 'Jev: a single small change, so no planning run');
+      const plan = single
+        ? [{ title: card.title, instructions: 'Implement the whole task as the agent instructions describe.', doneWhen: 'The acceptance criteria in the agent instructions are met, with tests.', dependsOn: [] }]
+        : await this.driverOf(this.lead()).plan({ card, references: refs, repoPath: worktree }, this.ctx(card.id, null, 'coordinator', signal));
       if (signal.aborted) throw new AbortError();
       const subtasks = db.addSubtasks(card.id, db.currentRound(card.id) + 1, plan.map((p) => ({ ...p, kind: p.kind ?? 'build' })));
       this.log(card, `Split into ${subtasks.length} subtask(s):\n${subtasks.map((s) => `${s.seq}. ${s.title}${s.dependsOn.length ? ` (after ${s.dependsOn.map((d) => `#${subtasks.find((x) => x.id === d)?.seq}`).join(', ')})` : ''}`).join('\n')}`, 'summary');
@@ -468,6 +475,8 @@ export class Coordinator {
       if (project || agent) return this.blockForBudget(card, subtask, new BudgetError(project ? 'project' : 'agent', (project ?? agent)!));
       subtask = db.updateSubtask(subtask.id, { status: 'running', worker, profileId: profile.id, attempts: subtask.attempts + 1, startedAt: Date.now(), endedAt: null })!;
       this.log(card, `Assigned "${subtask.title}" to ${profile.name}`, 'oneliner', subtask.id);
+      const contexts = profile.contextIds.map((id) => db.getContext(id)?.name).filter(Boolean);
+      if (contexts.length) db.addLog(card.id, subtask.id, worker, 'oneliner', `Using contexts: ${contexts.join(', ')}`, profile.id);
 
       const { branch, worktree } = await createSubtaskWorktree(cfg.repoPath, card, subtask);
       subtask = db.updateSubtask(subtask.id, { branch, worktree })!;
@@ -720,10 +729,13 @@ export class Coordinator {
     db.addComment(card.id, 'coordinator', 'handoff', db.redactSecrets(card.id, notes));
 
     db.setStatus(card.id, 'deciding', 'Deciding whether this needs your approval');
-    const decision = await this.driverOf(this.lead()).decideApproval(
-      { card: db.getCard(card.id)!, subtasks: db.listSubtasks(card.id) },
-      this.ctx(card.id, null, 'coordinator', signal),
-    );
+    // Jev, when added, settles the common case (nothing needs a human) without an LLM run.
+    const fresh = db.getCard(card.id)!;
+    const quick = await approvalByJev(fresh, db.listSubtasks(card.id), { projectId: this.projectId, cardId: card.id }, signal);
+    if (signal.aborted) throw new AbortError();
+    const decision = quick
+      ? { needsApproval: false, kind: 'approval' as const, reason: quick.reason, questions: [] }
+      : await this.driverOf(this.lead()).decideApproval({ card: fresh, subtasks: db.listSubtasks(card.id) }, this.ctx(card.id, null, 'coordinator', signal));
     if (signal.aborted) throw new AbortError();
     this.log(card, `Approval needed: ${decision.needsApproval ? 'yes' : 'no'}. ${decision.reason}`, 'summary');
     if (decision.needsApproval) {

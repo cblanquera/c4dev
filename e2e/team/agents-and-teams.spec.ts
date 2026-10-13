@@ -27,7 +27,7 @@ test.describe('Journey: choosing the team', () => {
     const settings = page.getByRole('main');
     const menu = page.getByRole('navigation', { name: 'Settings sections' });
     await expect(settings.getByRole('heading', { name: 'Agents' })).toBeVisible();
-    await expect(menu.getByRole('link')).toHaveText(['Back to App', 'Agents', 'Skills', 'Providers', 'Limits', 'Data']);
+    await expect(menu.getByRole('link')).toHaveText(['Back to App', 'Agents', 'Skills', 'Contexts', 'Providers', 'Usage', 'Limits', 'Data']);
     await menu.getByRole('link', { name: 'Skills' }).click();
     await expect(page).toHaveURL(/#settings\/skills$/);
     await settings.getByRole('button', { name: 'Add skills' }).click();
@@ -50,7 +50,7 @@ test.describe('Journey: choosing the team', () => {
     // Providers: every agent CLI, with whether it's installed and a switch.
     await menu.getByRole('link', { name: 'Providers' }).click();
     const list = settings.getByRole('list', { name: 'Providers' });
-    await expect(list.getByRole('listitem')).toHaveCount(4);
+    await expect(list.getByRole('listitem')).toHaveCount(5);
     for (const name of ['Claude', 'Codex', 'OpenCode', 'Pi']) await expect(list.getByRole('switch', { name: `Use ${name}` })).toBeVisible();
     await expectNoHorizontalOverflow(page);
 
@@ -104,8 +104,8 @@ test.describe('Journey: choosing the team', () => {
     await dialog.getByLabel('Picture').setInputFiles({ name: 'margaret.png', mimeType: 'image/png', buffer: PNG });
     await expect(dialog.locator('img.avatar').first()).toBeVisible();
     const sections = dialog.getByRole('tablist', { name: 'Agent sections' });
-    await sections.getByRole('tab', { name: 'Context' }).click();
-    await dialog.getByLabel('Brief').fill('Write defensive code and explain trade-offs.');
+    await sections.getByRole('tab', { name: 'Brief' }).click();
+    await dialog.getByRole('textbox', { name: 'Brief' }).fill('Write defensive code and explain trade-offs.');
     // Agents choose from the library, with search.
     await sections.getByRole('tab', { name: 'Skills' }).click();
     const search = dialog.getByRole('searchbox', { name: 'Search skills' });
@@ -140,6 +140,36 @@ test.describe('Journey: choosing the team', () => {
     const profile = state.profiles.find((p: { name: string }) => p.name === name);
     expect(state.projects.find((p: { id: number }) => p.id === 1).settings.team).toEqual([profile.id]);
     await request.patch('/api/projects/1', { data: { settings: { team: [] } } });
+  });
+
+  test('copying an agent opens a new agent form filled in from it', async ({ page }) => {
+    const name = `Casey copy ${test.info().project.name}`;
+    await page.goto('/#settings/agents');
+    const settings = page.getByRole('main');
+    await settings.getByRole('button', { name: 'Edit Casey' }).click();
+    await page.getByRole('dialog', { name: 'Edit Casey' }).getByRole('button', { name: 'Copy agent' }).click();
+    const copy = page.getByRole('dialog', { name: 'New agent' });
+    await expect(copy.getByLabel('Name')).toHaveValue('Casey (copy)');
+    await expect(copy.getByLabel('Role')).toHaveValue('developer');
+    await expect(copy.getByLabel('Job title')).toHaveValue('Designer');
+    await copy.getByRole('tablist', { name: 'Agent sections' }).getByRole('tab', { name: 'Brief' }).click();
+    await expect(copy.getByRole('textbox', { name: 'Brief' })).toHaveValue(/accessible contrast/);
+    await copy.getByRole('tablist', { name: 'Agent sections' }).getByRole('tab', { name: 'Profile' }).click();
+    await copy.getByLabel('Name').fill(name);
+    await copy.getByRole('button', { name: 'Create agent' }).click();
+    const tile = settings.getByRole('button', { name: `Edit ${name}` });
+    await expect(tile).toContainText('Designer (Worker)');
+    await expect(settings.getByRole('button', { name: 'Edit Casey', exact: true })).toBeVisible();
+
+    // The Chief of Staff is one of a kind, so it has no copy.
+    await settings.getByRole('button', { name: 'Edit Ada Lovelace' }).click();
+    await expect(page.getByRole('dialog', { name: 'Edit Ada Lovelace' }).getByRole('button', { name: 'Copy agent' })).toHaveCount(0);
+    await page.getByRole('dialog', { name: 'Edit Ada Lovelace' }).getByRole('button', { name: 'Cancel' }).click();
+
+    await tile.click();
+    page.once('dialog', (dialog) => void dialog.accept());
+    await page.getByRole('dialog', { name: `Edit ${name}` }).getByRole('button', { name: 'Delete' }).click();
+    await expect(tile).toHaveCount(0);
   });
 
   test('the board filters cards by type, and integration cards look different', async ({ page, request }) => {

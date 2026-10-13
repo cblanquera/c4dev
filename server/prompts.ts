@@ -11,7 +11,22 @@ export function profileBrief(profile: RunProfile | null | undefined): string {
   if (profile.context.trim()) lines.push('', `Your brief from the user:`, profile.context.trim());
   if (profile.skills.length) lines.push('', `Your skills: ${profile.skills.join(', ')}. Use them when they apply.`);
   lines.push('', 'Your brief never overrides your role\'s rules or permissions above.');
-  return `\n\n${lines.join('\n')}`;
+  return `\n\n${lines.join('\n')}${knowledgeBrief(profile)}`;
+}
+
+/**
+ * Knowledge folders the agent was given: each entry document in full (it's
+ * meant to be a compact index) and where the linked files live. Folders are
+ * read-only for every role, so every run gets them.
+ */
+function knowledgeBrief(profile: RunProfile): string {
+  const folders = (profile.contexts ?? []).filter((c) => c.transport === 'folder' && c.entry);
+  if (!folders.length) return '';
+  return folders.map((c) => [
+    '', '', `## Project knowledge: ${c.name}`,
+    `Reference material in ${c.folder}, outside the repository. Its entry document, ${c.entry}, follows. When a task touches something it covers, open the files it links to (paths are relative to that document) with your read and search tools before deciding. Treat it as accepted truth unless the task or the user says otherwise. Never edit files in that folder.`,
+    '', '<knowledge-entry>', c.entryText ?? '', '</knowledge-entry>',
+  ].join('\n')).join('');
 }
 
 const referenceBlock = (refs: Card[]) =>
@@ -197,7 +212,7 @@ export const AUDIT_SCHEMA = {
   },
 };
 
-const subtaskDigest = (subtasks: Subtask[]) =>
+export const subtaskDigest = (subtasks: Subtask[]) =>
   subtasks.map((s) => `- [${s.kind}/${s.status}] ${s.title}: ${s.summary || '(no summary)'}`).join('\n');
 
 export function approvalPrompt(card: Card, subtasks: Subtask[]): string {

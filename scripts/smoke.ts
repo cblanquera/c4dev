@@ -9,8 +9,11 @@
  *   npm run smoke -- codex --record      also save the raw CLI output under test-results/fixtures/
  *
  * Checks: the planner returns subtasks and leaves the repository untouched,
- * the worker writes the file it was asked for, tool calls are logged and
- * usage is reported. After a CLI update, a passing run means the parsers
+ * the worker writes the file it was asked for, a worker given a context (the
+ * test MCP server) calls its tool and receives its secret, tool calls are
+ * logged and usage is reported. Pi has no MCP support, so it skips that one.
+ * Every provider must also read a knowledge folder (a context with an
+ * AGENTS.md linking to the file that holds a codename). After a CLI update, a passing run means the parsers
  * still read it: update TESTED_VERSIONS in server/providers.ts. If the format
  * changed, compare the recorded output with test/fixtures/providers and
  * update the fixtures and parsers together.
@@ -100,7 +103,7 @@ async function smoke(id: ProviderId): Promise<Outcome> {
       outcome.tokens += u.inputTokens + u.outputTokens;
       outcome.costUsd += u.costUsd;
     },
-    profile: { id: 0, name: 'Smoke', job: 'developer', title: 'Smoke test', context: '', model: MODELS[id], skills: [], pluginDir: null, limits: LIMITS },
+    profile: { id: 0, name: 'Smoke', job: 'developer', title: 'Smoke test', context: '', model: MODELS[id], skills: [], pluginDir: null, limits: LIMITS, contexts: [] },
   };
   const card = { id: 1, title: 'Add a farewell', description: 'Add farewell(name) beside greet.', instructions: '## Objective\nAdd `farewell(name)` to src/greet.js returning `Goodbye, <name>`, with a test.' } as never;
   const driver = driverFor(id);
@@ -125,6 +128,65 @@ async function smoke(id: ProviderId): Promise<Outcome> {
     check('the worker writes the file', false, err instanceof Error ? err.message : String(err));
   }
   check('tool calls are logged', tools.length > 0, tools.slice(0, 3).join(' | '));
+  if (id === 'pi') {
+    outcome.checks.push(['the worker uses a context', true, 'skipped: Pi has no MCP support']);
+  } else {
+    // The test MCP server answers with its SECRET_WORD, so the word only reaches the file through the tool.
+    const word = `smoke-${Math.random().toString(36).slice(2, 8)}`;
+    const withContext: AgentContext = {
+      ...ctx,
+      profile: { ...ctx.profile!, contexts: [{
+        name: 'secrets', transport: 'stdio', command: process.execPath, args: [path.resolve('test/fixtures/mcp-server.mjs')],
+        env: { SECRET_WORD: word }, url: '', headers: {}, readOnly: false,
+      }] },
+    };
+    try {
+      const subtask = { id: 2, seq: 2, title: 'Write word.txt', instructions: 'Write the secret word', kind: 'build' } as never;
+      await driver.work({
+        card, subtask, cwd: repo, env: {}, model: MODELS[id],
+        prompt: 'Call the secret_word tool from the "secrets" MCP server, then create word.txt in the current directory containing exactly the word it returned. Do nothing else, then summarise.',
+      }, withContext);
+      const file = path.join(repo, 'word.txt');
+      const got = fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim() : '(no word.txt)';
+      check('the worker uses a context', got === word, got === word ? `wrote ${word} from the MCP tool` : `expected ${word}, got ${got}`);
+    } catch (err) {
+      check('the worker uses a context', false, err instanceof Error ? err.message : String(err));
+    }
+  }
+  // A knowledge folder outside the repository: the codename is only in the linked file, never in the instructions.
+  const kb = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-kb-')));
+  const codename = `ORCHID-${Math.floor(Math.random() * 9000 + 1000)}`;
+  fs.mkdirSync(path.join(kb, 'context'));
+  fs.writeFileSync(path.join(kb, 'AGENTS.md'), '# Knowledge\n\n- Product facts, including the launch codename: [product](context/product.md)\n');
+  fs.writeFileSync(path.join(kb, 'context', 'product.md'), `# Product\n\nThe launch codename is ${codename}.\n`);
+  try {
+    const withFolder: AgentContext = {
+      ...ctx,
+      profile: { ...ctx.profile!, contexts: [{
+        name: 'kb', transport: 'folder', folder: kb, entry: path.join(kb, 'AGENTS.md'), entryText: fs.readFileSync(path.join(kb, 'AGENTS.md'), 'utf8'),
+        command: '', args: [], env: {}, url: '', headers: {}, readOnly: true,
+      }] },
+    };
+    const subtask = { id: 3, seq: 3, title: 'Write codename.txt', instructions: 'Write the launch codename', kind: 'build' } as never;
+    await driver.work({
+      card, subtask, cwd: repo, env: {}, model: MODELS[id],
+      prompt: 'Look up the launch codename in the project knowledge, then create codename.txt in the current directory containing exactly the codename. Do nothing else, then summarise.',
+    }, withFolder);
+    const file = path.join(repo, 'codename.txt');
+    const got = fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim() : '(no codename.txt)';
+    check('the worker reads a knowledge folder', got === codename, got === codename ? `found ${codename} through AGENTS.md` : `expected ${codename}, got ${got}`);
+  } catch (err) {
+    check('the worker reads a knowledge folder', false, err instanceof Error ? err.message : String(err));
+  } finally {
+    fs.rmSync(kb, { recursive: true, force: true });
+  }
+  // The needs-a-human check runs without file tools; it must still answer in shape.
+  try {
+    const decision = await driver.decideApproval({ card: { ...(card as object), id: 1, worktree: repo, secretNames: [] } as never, subtasks: [] }, ctx);
+    check('decides whether a human is needed (no tools)', typeof decision?.needsApproval === 'boolean', `needsApproval: ${decision?.needsApproval}${decision?.reason ? ` · ${decision.reason.slice(0, 60)}` : ''}`);
+  } catch (err) {
+    check('decides whether a human is needed (no tools)', false, err instanceof Error ? err.message : String(err));
+  }
   check('usage is reported', outcome.tokens > 0, `${outcome.tokens} tokens, $${outcome.costUsd.toFixed(4)}`);
   fs.rmSync(repo, { recursive: true, force: true });
   return outcome;

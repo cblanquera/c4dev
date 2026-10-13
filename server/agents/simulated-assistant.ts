@@ -152,6 +152,13 @@ function statusLine(project: ProjectDigest): string {
   return `- **${project.name}**${project.paused ? ' (paused)' : ''}: ${parts.join(' · ') || 'nothing in flight'}`;
 }
 
+/** A high-level status of every project, or one: no model needed. */
+export function statusReport(projects: ProjectDigest[], projectId: number | null = null): { reply: string; cardIds: number[] } {
+  const scope = projectId == null ? projects : projects.filter((p) => p.id === projectId);
+  const waiting = scope.flatMap((p) => p.cards).filter((c) => c.stage === 'deliverables');
+  return { reply: scope.map(statusLine).join('\n') || 'No projects yet.', cardIds: waiting.map((c) => c.id) };
+}
+
 const CARD_FILTERS: [RegExp, string, (c: DigestCard) => boolean][] = [
   [/\b(done|complete\w*|finished|shipped)\b/i, 'completed', (c) => c.stage === 'complete'],
   [/\b(in progress|in flight|working on|running|active|being built)\b/i, 'in flight', (c) => ACTIVE_STAGES.includes(c.stage)],

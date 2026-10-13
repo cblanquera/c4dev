@@ -4,13 +4,39 @@
  */
 import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
 execFileSync('npm', ['run', 'build'], { stdio: 'inherit' });
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-e2e-'));
-const serverEnv = { ...process.env, FACTORY_DATA: dataDir, FACTORY_SIM_SPEED: '0.15' };
+/**
+ * A stand-in TypeSafe API so specs can add Jev without the real service: the
+ * key `test-jev-key` is accepted, and decisions fail (so the factory falls back,
+ * as without Jev) except a description containing VAGUE-E2E, which is too vague.
+ */
+const jev = http.createServer((req, res) => {
+  let body = '';
+  req.on('data', (d) => { body += d; });
+  req.on('end', () => {
+    if (req.headers.authorization !== 'Bearer test-jev-key') return res.writeHead(401).end();
+    if (req.url === '/v1/models') return res.writeHead(200, { 'content-type': 'application/json' }).end('{"models":[{"name":"jev-latest"}]}');
+    const { state, questions } = JSON.parse(body || '{}');
+    if (questions?.specificity && String(state?.task_description).includes('VAGUE-E2E')) {
+      return res.writeHead(200, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ model: 'jev-latest', answers: { specificity: { type: 'score', score: 0.1, confidence: 0.95 } }, usage: { input_tokens: 10, output_tokens: 1 } }));
+    }
+    res.writeHead(500).end();
+  });
+});
+await new Promise((resolve) => jev.listen(0, '127.0.0.1', resolve));
+
+// No OS dialogs during tests: the in-app folder picker stands in, as on a headless machine.
+const serverEnv = {
+  ...process.env, FACTORY_DATA: dataDir, FACTORY_SIM_SPEED: '0.15', FACTORY_NATIVE_DIALOGS: '0',
+  TYPESAFE_BASE_URL: `http://127.0.0.1:${jev.address().port}`,
+};
 let server;
 let direct;
 let runner;
@@ -78,5 +104,6 @@ try {
     direct.kill('SIGTERM');
     await new Promise((r) => (direct.exitCode !== null ? r() : direct.once('exit', r)));
   }
+  jev.close();
   fs.rmSync(dataDir, { recursive: true, force: true });
 }

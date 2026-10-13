@@ -196,6 +196,13 @@ textarea { resize: vertical; line-height: 1.5; }
 .chief-badge { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; align-self: flex-start; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; color: var(--accent); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
 .agent-skills { display: flex; flex-wrap: wrap; gap: 4px; }
 .avatar-field { display: flex; align-items: center; gap: 16px; }
+.logo-field { display: flex; align-items: flex-start; gap: 12px; }
+.logo-preview { flex: none; display: grid; place-items: center; width: 52px; height: 52px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }
+.logo-inputs { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.project-logo { flex: none; object-fit: contain; border-radius: 6px; }
+.back-link { display: inline-grid; place-items: center; width: 30px; height: 30px; color: var(--muted); }
+.back-link:hover { color: var(--text); }
+.project-tile-head > .project-logo, .project-tile-head > svg { flex: none; }
 .avatar-actions { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
 .skill-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .skill-list li { display: flex; align-items: center; gap: 8px; }
@@ -203,6 +210,7 @@ textarea { resize: vertical; line-height: 1.5; }
 .skill-option input, .team-option input { width: auto; margin-top: 3px; }
 .skill-option > span { display: flex; flex-direction: column; min-width: 0; overflow-wrap: anywhere; }
 .skills-library { display: flex; flex-direction: column; gap: 12px; }
+.contexts { display: flex; flex-direction: column; gap: 20px; }
 .skill-source { display: flex; flex-direction: column; gap: 6px; }
 .skill-search { margin-bottom: 2px; }
 .modal-narrow { width: min(560px, 100%); }
@@ -251,6 +259,70 @@ textarea { resize: vertical; line-height: 1.5; }
 .provider-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toggle:disabled { opacity: 0.4; }
 .settings-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.context-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.context-check { display: flex; align-items: flex-start; gap: 6px; margin: 0; overflow-wrap: anywhere; }
+.context-check .icon { flex: none; margin-top: 2px; }
+.context-check.is-ok { color: var(--add); }
+.context-check.is-bad { color: var(--danger); }
+.ctx-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.ctx-row { display: flex; align-items: center; gap: 12px; padding: 14px 16px; }
+.ctx-row + .ctx-row { border-top: 1px solid var(--border); }
+.ctx-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
+.ctx-row.is-off .ctx-row-main strong { color: var(--muted); }
+.ctx-form-stack { display: flex; flex-direction: column; gap: 10px; padding-top: 14px; }
+/* The dialog body scrolls; without this the cards would shrink to fit instead. */
+.ctx-form-stack > * { flex-shrink: 0; }
+.ctx-card { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.ctx-card > h3 { margin: 0; font-size: 13px; }
+.ctx-card .field { margin: 0; }
+.ctx-card .field-hint { margin: 0; }
+.ctx-test { padding: 10px 20px; border-top: 1px solid var(--border); }
+.ctx-paste summary { cursor: pointer; color: var(--accent); font-size: 13px; font-weight: 600; }
+.ctx-paste[open] summary { margin-bottom: 4px; }
+.segmented { display: grid; grid-auto-columns: 1fr; grid-auto-flow: column; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.segmented button { border: 0; border-radius: 0; padding: 9px 10px; background: var(--surface); color: var(--muted); font-size: 13px; font-weight: 600; }
+.segmented button + button { border-left: 1px solid var(--border); }
+.segmented button[aria-pressed='true'] { background: var(--accent-soft); color: var(--accent); }
+.repeat-row { display: flex; align-items: center; gap: 8px; }
+.repeat-row input { flex: 1; min-width: 0; }
+.add-row { width: 100%; justify-content: center; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); color: var(--text); font-size: 12.5px; font-weight: 600; }
+.add-row:hover { border-color: var(--border-strong); }
+.chip-context { display: inline-flex; align-items: center; gap: 4px; }
+.usage-report { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.usage-report h3 { margin: 0 0 8px; font-size: 14px; }
+.usage-filters { display: flex; gap: 10px; flex-wrap: wrap; }
+.usage-filters .segmented button { padding: 6px 14px; }
+.usage-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.usage-tile { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); min-width: 0; }
+.usage-tile-label { font-size: 13px; color: var(--muted); }
+.usage-tile-value { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; }
+.usage-plot { position: relative; height: 200px; padding-top: 18px; }
+.usage-grid { position: absolute; inset: 18px 0 22px 0; pointer-events: none; }
+.usage-grid span { position: absolute; left: 0; right: 0; border-top: 1px solid var(--border); }
+.usage-grid em { position: absolute; right: 0; top: -15px; font-style: normal; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.usage-columns { position: relative; display: flex; height: 100%; border-bottom: 1px solid var(--border-strong); }
+.usage-column { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; outline: none; cursor: default; }
+.usage-column:focus-visible .usage-bar-slot { box-shadow: inset 0 0 0 2px var(--accent); border-radius: 6px; }
+.usage-bar-slot { position: relative; flex: 1; width: 100%; display: flex; justify-content: center; align-items: flex-end; }
+.usage-bar { width: min(24px, calc(100% - 2px)); background: var(--accent); border-radius: 4px 4px 0 0; }
+.usage-column.is-focus .usage-bar { filter: brightness(1.15); }
+.usage-bar-label { position: absolute; transform: translateY(-4px); font-size: 11px; color: var(--text); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.usage-x { height: 22px; line-height: 22px; font-size: 11px; color: var(--muted); white-space: nowrap; margin-bottom: -22px; transform: translateY(22px); }
+.usage-chart { padding-bottom: 22px; }
+.usage-tooltip { position: absolute; top: 0; transform: translateX(-50%); z-index: 5; display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow-lg); font-size: 12px; white-space: nowrap; pointer-events: none; }
+.usage-tooltip strong { font-size: 14px; }
+.usage-tooltip.align-start { transform: translateX(-12px); }
+.usage-tooltip.align-end { transform: translateX(calc(-100% + 12px)); }
+/* Fieldsets default to min-width: min-content, which pushes wide content (tables, tiles) past a narrow dialog. */
+.settings-panel fieldset { min-width: 0; }
+.usage-table-view summary { cursor: pointer; font-size: 13px; font-weight: 600; }
+.usage-table-view[open] summary { margin-bottom: 8px; }
+.usage-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+.usage-table { width: 100%; border-collapse: collapse; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.usage-table th, .usage-table td { padding: 7px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--border); }
+.usage-table th:first-child, .usage-table td:first-child { text-align: left; }
+.usage-table thead th { color: var(--muted); font-weight: 600; }
+.usage-table tfoot th, .usage-table tfoot td { font-weight: 700; border-bottom: 0; }
 .budget-fields { display: flex; flex-direction: column; gap: 6px; }
 .budget-fields .field-hint, .budget-month { margin: 0; }
 .budget-month.is-over { color: var(--danger); font-weight: 600; }

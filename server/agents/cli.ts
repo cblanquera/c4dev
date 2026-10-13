@@ -27,8 +27,9 @@ import type {
   AgentContext, ApprovalDecision, AssistantReply, AuditResult, CoordinatorReply, Driver, InstructionEvent, PlannedSubtask,
   ProjectDigest, RunUsage, WorkResult,
 } from './driver.ts';
-import { limitError } from './driver.ts';
+import { contextsFor, folderContexts, limitError, mcpContexts } from './driver.ts';
 import { DEFAULT_LIMITS } from '../settings.ts';
+import type { RunContext } from '../contexts.ts';
 
 export type CliProvider = 'codex' | 'opencode' | 'pi';
 export type Access = 'none' | 'read' | 'write';
@@ -42,6 +43,56 @@ export interface CliRun {
   access: Access;
   /** Codex only: a JSON Schema file its final message must follow. */
   schemaFile?: string;
+  /** MCP servers this run may start; their secrets travel in the environment (`cliEnv`), never on the command line. */
+  contexts?: RunContext[];
+  /** The environment carries secrets the agent's own commands need (a worker's card secrets). */
+  secrets?: boolean;
+}
+
+/** Codex reads a header or variable's value from this environment variable. */
+const codexVar = (context: number, i: number) => `FACTORY_MCP_${context}_${i}`;
+const toml = (value: unknown) => JSON.stringify(value);
+
+/**
+ * Codex config overrides for each context: values are TOML, secrets are named,
+ * not given. Codex asks before every MCP tool call, which `codex exec` can't,
+ * so the user's choice to give an agent the context is its approval.
+ */
+function codexContexts(contexts: RunContext[]): string[] {
+  return contexts.flatMap((c, n) => {
+    const key = `mcp_servers.${c.name}`;
+    const approve = ['-c', `${key}.default_tools_approval_mode="approve"`];
+    if (c.transport === 'stdio') {
+      return [...approve, '-c', `${key}.command=${toml(c.command)}`, '-c', `${key}.args=${toml(c.args)}`,
+        ...(Object.keys(c.env).length ? ['-c', `${key}.env_vars=${toml(Object.keys(c.env))}`] : [])];
+    }
+    const headers = Object.keys(c.headers).map((h, i) => `${toml(h)} = ${toml(codexVar(n, i))}`);
+    return [...approve, '-c', `${key}.url=${toml(c.url)}`, ...(headers.length ? ['-c', `${key}.env_http_headers={ ${headers.join(', ')} }`] : [])];
+  });
+}
+
+/**
+ * The environment a CLI run needs for its contexts: Codex reads values from
+ * named variables, OpenCode takes its MCP config inline. Pi has no MCP support.
+ */
+export function cliEnv(provider: CliProvider, given: RunContext[]): Record<string, string> {
+  const contexts = provider === 'pi' ? [] : mcpContexts(given);
+  // OpenCode refuses reads outside the project unless the folder is allowed.
+  const folders = provider === 'opencode' ? folderContexts(given) : [];
+  if (!contexts.length && !folders.length) return {};
+  if (provider === 'codex') {
+    return Object.assign({}, ...contexts.map((c, n) => (c.transport === 'stdio'
+      ? c.env
+      : Object.fromEntries(Object.values(c.headers).map((v, i) => [codexVar(n, i), v])))));
+  }
+  if (provider === 'opencode') {
+    const mcp = Object.fromEntries(contexts.map((c) => [c.name, c.transport === 'stdio'
+      ? { type: 'local', command: [c.command, ...c.args], environment: c.env, enabled: true }
+      : { type: 'remote', url: c.url, headers: c.headers, enabled: true }]));
+    const permission = folders.length ? { external_directory: Object.fromEntries(folders.map((c) => [`${c.folder}/**`, 'allow'])) } : undefined;
+    return { OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...(contexts.length ? { mcp } : {}), ...(permission ? { permission } : {}) }) };
+  }
+  return {};
 }
 
 const PI_READ_TOOLS = 'read,grep,find,ls';
@@ -56,6 +107,9 @@ export function cliCommand(spec: CliRun): string[] {
     case 'codex':
       return ['codex', 'exec', '--json', '--skip-git-repo-check', '-C', spec.cwd, '-s', write ? 'workspace-write' : 'read-only',
         ...(write ? ['-c', 'sandbox_workspace_write.network_access=true'] : []), ...model('-m'),
+        // Codex hides *KEY*, *SECRET* and *TOKEN* variables from commands; a worker given credentials needs them.
+        ...(write && spec.secrets ? ['-c', 'shell_environment_policy.ignore_default_excludes=true'] : []),
+        ...codexContexts(spec.contexts ?? []),
         ...(spec.schemaFile ? ['--output-schema', spec.schemaFile] : []), spec.prompt];
     case 'opencode':
       return ['opencode', 'run', '--format', 'json', '--dir', spec.cwd, '--agent', write ? 'build' : 'plan', ...(write ? ['--auto'] : []), ...model('-m'), spec.prompt];
@@ -118,6 +172,7 @@ export function parseLine(provider: CliProvider, line: string, cwd: string, mode
   if (provider === 'codex') {
     const item = e.item ?? {};
     if (e.type === 'item.started' && item.type === 'command_execution') return { tool: `$ ${short(unwrapShell(str(item.command)))}` };
+    if (e.type === 'item.started' && item.type === 'mcp_tool_call') return { tool: `MCP ${str(item.server)}.${str(item.tool)}` };
     if (e.type === 'item.completed' && item.type === 'file_change') {
       return { tool: (item.changes ?? []).map((c: any) => `Edited ${path.relative(cwd, str(c.path)) || str(c.path)}`).join(', ') || 'Edited files' };
     }
@@ -203,6 +258,8 @@ interface RoleRun {
   ctx: Pick<AgentContext, 'signal' | 'profile' | 'usage'> & { log?: AgentContext['log'] };
   /** Tool lines for live progress (instruction writing streams these). */
   onTool?: (line: string) => void;
+  /** Card secrets for a worker's commands. */
+  env?: Record<string, string>;
 }
 
 export interface CliDriverOptions {
@@ -232,7 +289,12 @@ export class CliDriver implements Driver {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-cli-'));
     let schemaFile: string | undefined;
     if (spec.schema && this.name === 'codex') fs.writeFileSync(schemaFile = path.join(tmp, 'schema.json'), JSON.stringify(spec.schema));
-    const argv = cliCommand({ provider: this.name, cwd: spec.cwd, prompt, model, access: spec.access, schemaFile });
+    const contexts = contextsFor(ctx.profile, spec.access === 'write');
+    const servers = mcpContexts(contexts);
+    if (servers.length && this.name === 'pi') ctx.log?.('detail', `Pi can't use MCP servers, so these contexts were skipped: ${servers.map((c) => c.name).join(', ')}`);
+    const usable = this.name === 'pi' ? folderContexts(contexts) : contexts;
+    const secrets = !!spec.env && Object.keys(spec.env).length > 0;
+    const argv = cliCommand({ provider: this.name, cwd: spec.cwd, prompt, model, access: spec.access, schemaFile, contexts: mcpContexts(usable), secrets });
     let last = '';
     let error = '';
     // The CLIs have no common turn or time limit, so tool calls are counted and the clock is kept here.
@@ -246,7 +308,7 @@ export class CliDriver implements Driver {
     }, limits.runMinutes * 60_000);
     try {
       const res = await run(argv.map(shellQuote).join(' '), {
-        cwd: spec.cwd, signal: AbortSignal.any([ctx.signal, stop.signal]),
+        cwd: spec.cwd, signal: AbortSignal.any([ctx.signal, stop.signal]), env: { ...spec.env, ...cliEnv(this.name, usable) },
         onLine: (line) => {
           this.record?.(spec.access, line);
           const event = parseLine(this.name, line, spec.cwd, model);
@@ -308,7 +370,7 @@ export class CliDriver implements Driver {
   /** Workers can't call factory tools from a CLI, so needing a person is part of their final answer. */
   async work(input: { card: Card; subtask: Subtask; cwd: string; prompt: string; env: Record<string, string>; model: string }, ctx: AgentContext): Promise<WorkResult> {
     const result = await this.structured<{ summary: string; blocked: boolean; question: string; secretName: string }>({
-      system: WORKER_CLI_SYSTEM, prompt: input.prompt, cwd: input.cwd, model: input.model, access: 'write', schema: WORK_SCHEMA, ctx,
+      system: WORKER_CLI_SYSTEM, prompt: input.prompt, cwd: input.cwd, model: input.model, access: 'write', schema: WORK_SCHEMA, ctx, env: input.env,
     });
     return {
       summary: String(result.summary ?? '').trim(),
@@ -332,7 +394,8 @@ export class CliDriver implements Driver {
   async decideApproval(input: { card: Card; subtasks: Subtask[] }, ctx: AgentContext): Promise<ApprovalDecision> {
     return inFolder(input.card.worktree, (cwd) => this.structured<ApprovalDecision>({
       system: 'You are the coordinator of a software factory deciding whether finished work needs a human.',
-      prompt: approvalPrompt(input.card, input.subtasks), cwd, model: this.model(), access: 'read', schema: APPROVAL_SCHEMA, ctx,
+      // Everything it needs is in the prompt, so it runs without file tools.
+      prompt: approvalPrompt(input.card, input.subtasks), cwd, model: this.model(), access: 'none', schema: APPROVAL_SCHEMA, ctx,
     }));
   }
 

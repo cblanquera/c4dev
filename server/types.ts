@@ -70,6 +70,8 @@ export interface AgentProfile {
   /** The model on that provider; empty uses the provider's default. */
   model: string;
   skillIds: number[];
+  /** MCP servers from the contexts library this agent's runs can use. */
+  contextIds: number[];
   /** Monthly limits on this agent's runs; 0 means no limit. */
   budgetUsd: number;
   budgetTokens: number;
@@ -78,11 +80,73 @@ export interface AgentProfile {
   archived: boolean;
 }
 
+/**
+ * A context: an MCP server agents can be given, started from a command or
+ * reached at a URL, or a local folder of Markdown knowledge (an AGENTS.md or
+ * CONTEXT.md entry document and the files it links to). Environment and
+ * header values are secrets: they're encrypted at rest and never sent to
+ * clients, only their names.
+ */
+export interface Context {
+  id: number;
+  /** Letters, digits, - and _; agents see its tools as mcp__<name>__<tool>. */
+  name: string;
+  description: string;
+  transport: 'stdio' | 'http' | 'folder';
+  /** folder: where the knowledge lives (`~` is the home folder). */
+  folder: string;
+  /** stdio: the command and its arguments. */
+  command: string;
+  args: string[];
+  /** stdio: where the command starts (`~` is the home folder); empty is the factory's folder. */
+  cwd: string;
+  /** stdio: variables passed through from the factory's own environment, by name. */
+  envPassthrough: string[];
+  /** http: a streamable HTTP endpoint. */
+  url: string;
+  /** http: a variable in the factory's environment holding a bearer token for the Authorization header. */
+  bearerTokenEnv: string;
+  /** http: headers whose values come from the factory's environment: header → variable. */
+  envHeaders: Record<string, string>;
+  envNames: string[];
+  headerNames: string[];
+  /** Its tools only read, so read-only roles (planner, architect, assistant) may use it too. */
+  readOnly: boolean;
+  /** Switched off, no agent starts it, though it stays attached. */
+  enabled: boolean;
+  createdAt: number;
+}
+
+/** What the assistant's Status button asks; the server answers it from the boards, without a model. */
+export const STATUS_QUESTION = 'What is the status of all projects?';
+
+/**
+ * Jev, TypeSafe's decision model: optional. When it's added and switched on,
+ * routine decisions (does this need a human, can planning be skipped, is this
+ * too vague, is this a status question) are asked of it before a full LLM run;
+ * without it, or when it's unsure, the factory works exactly as before.
+ */
+export interface JevStatus {
+  /** An API key is saved (never sent to clients). */
+  configured: boolean;
+  enabled: boolean;
+  model: string;
+}
+
 /** Caps on every agent run, factory-wide. A run that hits one stops and counts as a failed attempt. */
 export interface RunLimits {
   /** Tool calls or model turns. */
   maxTurns: number;
   runMinutes: number;
+}
+
+/** Usage per local calendar day and per model, for the Usage sections. */
+export interface UsageReport {
+  /** Oldest first, one entry per day in the range (days without runs are zero). `day` is YYYY-MM-DD. */
+  days: (UsageTotals & { day: string })[];
+  /** Most expensive first, then most tokens. */
+  models: (UsageTotals & { model: string })[];
+  total: UsageTotals;
 }
 
 /** Usage since the start of this calendar month (server time), for budgets. */
@@ -261,6 +325,8 @@ export interface ProviderStatus {
 export interface Settings {
   /** Absolute path to the git repository agents work on. */
   repoPath: string;
+  /** The project's logo: an uploaded image (/uploads/…) or an http(s) link; empty shows the factory's. */
+  logoUrl: string;
   baseBranch: string;
   /** Max cards the coordinator works on at once. */
   maxActiveCards: number;
@@ -339,9 +405,12 @@ export type FactoryEvent =
   | { type: 'profile'; profile: AgentProfile }
   | { type: 'skill'; skill: Skill }
   | { type: 'skill_removed'; id: number }
+  | { type: 'context'; context: Context }
+  | { type: 'context_removed'; id: number }
   | { type: 'usage'; record: UsageRecord }
   | { type: 'providers'; providers: ProviderStatus[] }
-  | { type: 'limits'; limits: RunLimits };
+  | { type: 'limits'; limits: RunLimits }
+  | { type: 'jev'; jev: JevStatus };
 
 /** Everything a client needs on (re)connect. */
 export interface FactoryState {
@@ -352,7 +421,9 @@ export interface FactoryState {
   assistant: AssistantState;
   profiles: AgentProfile[];
   skills: Skill[];
+  contexts: Context[];
   providers: ProviderStatus[];
+  jev: JevStatus;
   usage: { byProject: Record<number, UsageTotals>; byProfile: Record<number, UsageTotals>; month: MonthUsage };
   limits: RunLimits;
 }

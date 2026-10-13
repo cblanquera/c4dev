@@ -1,7 +1,7 @@
 /**
  * Agents in Settings: every profile with its picture, title, skills, projects
- * and usage, and an editor for its name, picture, role, title, brief, model
- * and skills. The Chief of Staff, who runs the assistant, is shown first; it
+ * and usage, and an editor for its name, picture, role, title, brief, model,
+ * skills and contexts (MCP servers). The Chief of Staff, who runs the assistant, is shown first; it
  * keeps its role and can't be deleted.
  */
 import { Icon } from './Icon.tsx';
@@ -12,7 +12,7 @@ import { usageLine } from '../format.ts';
 import { NO_USAGE } from '../store.ts';
 import { ModelInput, ProviderSelect } from './ProviderPicker.tsx';
 import { BudgetFields } from './BudgetFields.tsx';
-import { AGENT_JOBS, JOB_LABELS, type AgentJob, type AgentProfile, type Project, type ProviderStatus, type Skill, type UsageTotals } from '../../../server/types.ts';
+import { AGENT_JOBS, JOB_LABELS, type AgentJob, type AgentProfile, type Context, type Project, type ProviderStatus, type Skill, type UsageTotals } from '../../../server/types.ts';
 import { JOB_CONTEXT, ROLE_GROUPS, assistantOf, profileTitle, providerLabel } from '../agents.ts';
 
 /** Roles that can be chosen: there's only one Chief of Staff. */
@@ -33,6 +33,7 @@ function projectsOf(profile: AgentProfile, projects: Project[]): Project[] {
 interface SectionProps {
   profiles: AgentProfile[];
   skills: Map<number, Skill>;
+  contexts: Map<number, Context>;
   projects: Project[];
   usage: Record<number, UsageTotals>;
   /** Usage per agent since the 1st of the month. */
@@ -41,8 +42,11 @@ interface SectionProps {
   onError: (message: string) => void;
 }
 
-export function AgentsSection({ profiles, skills, projects, usage, monthUsage, providers, onError }: SectionProps) {
-  const [editing, setEditing] = useState<AgentProfile | 'new' | null>(null);
+export function AgentsSection({ profiles, skills, contexts, projects, usage, monthUsage, providers, onError }: SectionProps) {
+  /** The agent being edited, a new one (blank, or `initial` when copying), or nothing. */
+  const [editing, setEditing] = useState<AgentProfile | 'new' | { copy: ProfileInput } | null>(null);
+  const isNew = editing === 'new' || (!!editing && 'copy' in editing);
+  const existing = editing && editing !== 'new' && !('copy' in editing) ? editing : null;
   const chief = assistantOf(profiles);
   const groups = ROLE_GROUPS.map((g) => ({ ...g, list: profiles.filter((p) => g.jobs.includes(p.job) && !p.archived && p.id !== chief?.id) })).filter((g) => g.list.length);
   return (
@@ -82,6 +86,9 @@ export function AgentsSection({ profiles, skills, projects, usage, monthUsage, p
                       {profile.skillIds.length > 0 && (
                         <span className="agent-skills">{profile.skillIds.map((id) => skills.get(id)).filter((s) => !!s).map((s) => <span key={s!.id} className="chip">{s!.name}</span>)}</span>
                       )}
+                      {profile.contextIds.length > 0 && (
+                        <span className="agent-skills" aria-label="Contexts">{profile.contextIds.map((id) => contexts.get(id)).filter((c) => !!c).map((c) => <span key={c!.id} className="chip chip-context"><Icon name="plug" size={12} /> {c!.name}</span>)}</span>
+                      )}
                       <span className="muted small">{works.length === projects.length ? 'All projects' : works.map((p) => p.name).join(', ') || 'No projects'}</span>
                       <span className="muted small">{usageLine(usage[profile.id] ?? NO_USAGE)}</span>
                     </span>
@@ -93,18 +100,25 @@ export function AgentsSection({ profiles, skills, projects, usage, monthUsage, p
         </section>
       ))}
       {editing && (
-        <ProfileEditor profile={editing === 'new' ? null : editing} skills={skills} projects={projects} providers={providers} usage={editing === 'new' ? NO_USAGE : usage[editing.id] ?? NO_USAGE}
-          monthUsage={editing === 'new' ? NO_USAGE : monthUsage[editing.id] ?? NO_USAGE} onClose={() => setEditing(null)} onError={onError} />
+        <ProfileEditor key={existing ? existing.id : `new-${isNew && editing !== 'new' ? 'copy' : 'blank'}`} profile={existing}
+          initial={editing !== 'new' && 'copy' in editing ? editing.copy : undefined} skills={skills} contexts={contexts} projects={projects} providers={providers}
+          usage={existing ? usage[existing.id] ?? NO_USAGE : NO_USAGE} monthUsage={existing ? monthUsage[existing.id] ?? NO_USAGE : NO_USAGE}
+          onCopy={(draft) => setEditing({ copy: { ...draft, name: `${draft.name} (copy)` } })} onClose={() => setEditing(null)} onError={onError} />
       )}
     </div>
   );
 }
 
-type Section = 'profile' | 'context' | 'skills' | 'usage';
+type Section = 'profile' | 'context' | 'skills' | 'contexts' | 'usage';
 
 interface EditorProps {
   profile: AgentProfile | null;
+  /** A new agent's starting values, e.g. a copy of another agent. */
+  initial?: ProfileInput;
+  /** Opens a new agent pre-filled with this one's current values. */
+  onCopy?: (draft: ProfileInput) => void;
   skills: Map<number, Skill>;
+  contexts: Map<number, Context>;
   projects: Project[];
   providers: ProviderStatus[];
   usage: UsageTotals;
@@ -115,25 +129,31 @@ interface EditorProps {
 
 const UPLOAD_TYPES = 'image/png,image/jpeg,image/gif,image/webp,image/svg+xml';
 
-export function ProfileEditor({ profile, skills, projects, providers, usage, monthUsage, onClose, onError }: EditorProps) {
-  const [draft, setDraft] = useState<ProfileInput>(profile
+export function ProfileEditor({ profile, initial, onCopy, skills, contexts, projects, providers, usage, monthUsage, onClose, onError }: EditorProps) {
+  const [draft, setDraft] = useState<ProfileInput>(initial ?? (profile
     ? {
       name: profile.name, job: profile.job, title: profile.title, provider: profile.provider, context: profile.context, imageUrl: profile.imageUrl,
-      model: profile.model, skillIds: profile.skillIds, budgetUsd: profile.budgetUsd, budgetTokens: profile.budgetTokens,
+      model: profile.model, skillIds: profile.skillIds, contextIds: profile.contextIds, budgetUsd: profile.budgetUsd, budgetTokens: profile.budgetTokens,
     }
-    : { name: '', job: 'developer', title: '', provider: 'simulated', context: '', imageUrl: null, model: '', skillIds: [], budgetUsd: 0, budgetTokens: 0 });
+    : { name: '', job: 'developer', title: '', provider: 'simulated', context: '', imageUrl: null, model: '', skillIds: [], contextIds: [], budgetUsd: 0, budgetTokens: 0 }));
   const [section, setSection] = useState<Section>('profile');
   const [skillQuery, setSkillQuery] = useState('');
+  const [contextQuery, setContextQuery] = useState('');
   const [saving, setSaving] = useState(false);
   const imageInput = useRef<HTMLInputElement>(null);
   const sections: { id: Section; label: string }[] = [
-    { id: 'profile', label: 'Profile' }, { id: 'context', label: 'Context' }, { id: 'skills', label: 'Skills' }, { id: 'usage', label: 'Usage' },
+    { id: 'profile', label: 'Profile' }, { id: 'context', label: 'Brief' }, { id: 'skills', label: 'Skills' }, { id: 'contexts', label: 'Contexts' }, { id: 'usage', label: 'Usage' },
   ];
   const chief = profile?.job === 'assistant';
   const set = <K extends keyof ProfileInput>(key: K, value: ProfileInput[K]) => setDraft((d) => ({ ...d, [key]: value }));
   const library = [...skills.values()].sort((a, b) => a.name.localeCompare(b.name));
   const query = skillQuery.trim().toLowerCase();
   const matching = library.filter((skill) => !query || `${skill.name} ${skill.description}`.toLowerCase().includes(query));
+  const contextLibrary = [...contexts.values()].sort((a, b) => a.name.localeCompare(b.name));
+  const contextSearch = contextQuery.trim().toLowerCase();
+  const contextMatches = contextLibrary.filter((c) => !contextSearch || [c.name, c.description, c.folder, c.url, c.command].join(' ').toLowerCase().includes(contextSearch));
+  // Read-only roles only ever start read-only contexts (server/agents/driver.ts).
+  const writes = draft.job === 'developer' || draft.job === 'auditor';
 
   async function run(fn: () => Promise<unknown>) {
     setSaving(true);
@@ -233,7 +253,7 @@ export function ProfileEditor({ profile, skills, projects, providers, usage, mon
             </fieldset>}
 
             {section === 'context' && <fieldset>
-              <legend>Context</legend>
+              <legend>Brief</legend>
               <div className="field">
                 <label className="field-label" htmlFor="profile-brief">Brief</label>
                 <textarea id="profile-brief" aria-describedby="profile-brief-hint" rows={14} value={draft.context} onChange={(e) => set('context', e.target.value)}
@@ -264,6 +284,36 @@ export function ProfileEditor({ profile, skills, projects, providers, usage, mon
               </ul>
             </fieldset>}
 
+            {section === 'contexts' && <fieldset>
+              <legend>Contexts</legend>
+              <p className="field-hint">MCP servers and knowledge folders this agent's runs can use. Add them in Settings → Contexts.{writes ? '' : ' This role only reads, so it only gets read-only contexts.'}</p>
+              {draft.provider === 'pi' && <p className="small provider-version"><Icon name="circle-alert" size={12} /> Pi can't use MCP servers, so its runs skip these.</p>}
+              {contextLibrary.length > 0 && (
+                <input type="search" className="skill-search" aria-label="Search contexts" placeholder={`Search ${contextLibrary.length} context${contextLibrary.length === 1 ? '' : 's'}`}
+                  value={contextQuery} onChange={(e) => setContextQuery(e.target.value)} />
+              )}
+              {!contextLibrary.length && <p className="muted small">No contexts yet.</p>}
+              {contextLibrary.length > 0 && (
+                <p className="muted small" role="status">
+                  {draft.contextIds.filter((id) => contexts.has(id)).length} attached{contextSearch ? ` · ${contextMatches.length} match${contextMatches.length === 1 ? '' : 'es'}` : ''}
+                </p>
+              )}
+              <ul className="skill-list">
+                {contextMatches.map((context) => (
+                  <li key={context.id}>
+                    <label className="skill-option">
+                      <input type="checkbox" checked={draft.contextIds.includes(context.id)}
+                        onChange={(e) => set('contextIds', e.target.checked ? [...draft.contextIds, context.id] : draft.contextIds.filter((id) => id !== context.id))} />
+                      <span>
+                        <strong className="mono">{context.name}</strong>
+                        <span className="muted small">{context.description || (context.transport === 'folder' ? context.folder : context.transport === 'stdio' ? context.command : context.url)}{context.readOnly ? ' · read-only' : writes ? '' : ' · not used by this role'}{context.enabled ? '' : ' · switched off'}</span>
+                      </span>
+                    </label>
+                  </li>
+                ))}
+              </ul>
+            </fieldset>}
+
             {section === 'usage' && <fieldset>
               <legend>Usage</legend>
               {profile && <>
@@ -281,6 +331,8 @@ export function ProfileEditor({ profile, skills, projects, providers, usage, mon
         <footer className="modal-foot">
           {profile && !chief && <button className="danger ghost" disabled={saving} onClick={() => confirm(`Delete ${profile.name}? Recorded activity keeps their name.`) && run(async () => { await api.removeProfile(profile.id); onClose(); })}>Delete</button>}
           <span className="spacer" />
+          {/* There's only one Chief of Staff, so it can't be copied. */}
+          {profile && !chief && onCopy && <button className="secondary" disabled={saving} onClick={() => onCopy(draft)}><Icon name="copy" size={14} /> Copy agent</button>}
           <button className="secondary" onClick={onClose}>Cancel</button>
           <button className="primary" disabled={saving || !draft.name.trim()} onClick={save}>{profile ? 'Save agent' : 'Create agent'}</button>
         </footer>

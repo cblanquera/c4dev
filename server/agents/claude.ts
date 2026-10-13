@@ -15,7 +15,15 @@ import { DATA_DIR, DEFAULT_LIMITS } from '../settings.ts';
 import type {
   AgentContext, ApprovalDecision, AssistantReply, InstructionEvent, AuditResult, CoordinatorReply, Driver, PlannedSubtask, ProjectDigest, RunUsage, WorkResult,
 } from './driver.ts';
-import { limitError } from './driver.ts';
+import { contextsFor, folderContexts, limitError, mcpContexts } from './driver.ts';
+import type { RunContext } from '../contexts.ts';
+
+/** Contexts as the SDK's MCP server configs. */
+function mcpConfigs(contexts: RunContext[]): NonNullable<Options['mcpServers']> {
+  return Object.fromEntries(contexts.map((c) => [c.name, c.transport === 'stdio'
+    ? { type: 'stdio' as const, command: c.command, args: c.args, env: c.env }
+    : { type: 'http' as const, url: c.url, headers: c.headers }]));
+}
 
 const READ_ONLY_TOOLS = ['Read', 'Glob', 'Grep'];
 
@@ -61,6 +69,12 @@ async function runAgent(spec: RunSpec): Promise<{ text: string; structured: unkn
   if (spec.signal.aborted) abort();
   spec.signal.addEventListener('abort', abort, { once: true });
   const limits = spec.profile?.limits ?? DEFAULT_LIMITS;
+  // The factory's own in-process tools keep their name if a context reuses it.
+  const given = contextsFor(spec.profile, !spec.readOnly && !spec.noFiles);
+  const contexts = mcpContexts(given).filter((c) => !spec.mcpServers?.[c.name]);
+  const contextTools = contexts.map((c) => `mcp__${c.name}`);
+  // Knowledge folders sit outside the run's folder; read tools may open them.
+  const folders = folderContexts(given).map((c) => c.folder!);
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
@@ -72,15 +86,16 @@ async function runAgent(spec: RunSpec): Promise<{ text: string; structured: unkn
     model: spec.profile?.model || spec.model,
     abortController,
     maxTurns: limits.maxTurns,
+    ...(folders.length && !spec.noFiles ? { additionalDirectories: folders } : {}),
     systemPrompt: { type: 'preset', preset: 'claude_code', append: spec.system + profileBrief(spec.profile) },
     ...(spec.profile?.pluginDir ? { plugins: [{ type: 'local', path: spec.profile.pluginDir, skipMcpDiscovery: true }] } : {}),
     settingSources: spec.noFiles ? [] : ['project'],
     env: { ...process.env, ...spec.env } as Record<string, string>,
-    mcpServers: spec.mcpServers,
+    mcpServers: { ...mcpConfigs(contexts), ...spec.mcpServers },
     ...(spec.noFiles
-      ? { tools: [], permissionMode: 'dontAsk', allowedTools: spec.extraTools ?? [] }
+      ? { tools: [], permissionMode: 'dontAsk', allowedTools: [...(spec.extraTools ?? []), ...contextTools] }
       : spec.readOnly
-        ? { permissionMode: 'dontAsk', allowedTools: [...READ_ONLY_TOOLS, ...(spec.extraTools ?? [])] }
+        ? { permissionMode: 'dontAsk', allowedTools: [...READ_ONLY_TOOLS, ...(spec.extraTools ?? []), ...contextTools] }
         : { permissionMode: 'bypassPermissions', allowDangerouslySkipPermissions: true }),
     ...(spec.schema ? { outputFormat: { type: 'json_schema', schema: spec.schema } } : {}),
   };
@@ -271,7 +286,9 @@ export class ClaudeDriver implements Driver {
       signal: ctx.signal,
       profile: ctx.profile,
       onUsage: ctx.usage,
+      // Everything it needs is in the prompt; without tools the run is smaller and cheaper.
       readOnly: true,
+      noFiles: true,
       schema: APPROVAL_SCHEMA,
     });
     return structured as ApprovalDecision;

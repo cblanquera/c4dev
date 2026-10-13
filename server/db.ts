@@ -12,7 +12,7 @@ import { emit } from './events.ts';
 import { isSealed, loadKey, seal, unseal } from './crypto.ts';
 import { STAGE_LABELS } from './types.ts';
 import type {
-  AgentJob, AgentProfile, AssistantMessage, AssistantMessageKind, Card, CardKind, Comment, CommentAuthor, CommentKind, LogEntry,
+  AgentJob, AgentProfile, AssistantMessage, Context, AssistantMessageKind, Card, CardKind, Comment, CommentAuthor, CommentKind, LogEntry,
   LogLevel, Settings, Skill, Stage, Subtask, SubtaskKind, UsageRecord, UsageTotals,
 } from './types.ts';
 
@@ -115,6 +115,20 @@ CREATE TABLE IF NOT EXISTS skills (
   description TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS contexts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  transport TEXT NOT NULL DEFAULT 'stdio',
+  command TEXT NOT NULL DEFAULT '',
+  args TEXT NOT NULL DEFAULT '[]',
+  url TEXT NOT NULL DEFAULT '',
+  secrets TEXT NOT NULL DEFAULT '{}',
+  env_names TEXT NOT NULL DEFAULT '[]',
+  header_names TEXT NOT NULL DEFAULT '[]',
+  read_only INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS usage (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   project_id INTEGER,
@@ -183,8 +197,15 @@ export function openDb(file: string): void {
   addColumn('skills', 'file_count', 'file_count INTEGER NOT NULL DEFAULT 1');
   // Designer was a role; designers are now workers titled Designer.
   db.exec(`UPDATE profiles SET job = 'developer', title = CASE WHEN title = '' THEN 'Designer' ELSE title END WHERE job = 'designer'`);
+  addColumn('profiles', 'context_ids', "context_ids TEXT NOT NULL DEFAULT '[]'");
   addColumn('profiles', 'budget_usd', 'budget_usd REAL NOT NULL DEFAULT 0');
   addColumn('profiles', 'budget_tokens', 'budget_tokens INTEGER NOT NULL DEFAULT 0');
+  addColumn('contexts', 'enabled', 'enabled INTEGER NOT NULL DEFAULT 1');
+  addColumn('contexts', 'cwd', "cwd TEXT NOT NULL DEFAULT ''");
+  addColumn('contexts', 'env_passthrough', "env_passthrough TEXT NOT NULL DEFAULT '[]'");
+  addColumn('contexts', 'bearer_env', "bearer_env TEXT NOT NULL DEFAULT ''");
+  addColumn('contexts', 'env_headers', "env_headers TEXT NOT NULL DEFAULT '{}'");
+  addColumn('contexts', 'folder', "folder TEXT NOT NULL DEFAULT ''");
   addColumn('cards', 'secret_names', "secret_names TEXT NOT NULL DEFAULT '[]'");
   db.exec('CREATE INDEX IF NOT EXISTS cards_project ON cards(project_id, stage, position);');
   for (let v = Math.max(version, 1) + 1; v <= SCHEMA_VERSION; v++) MIGRATIONS[v]?.();
@@ -617,6 +638,21 @@ export function saveSettings(patch: Record<string, unknown>): void {
   for (const [k, v] of Object.entries(patch)) stmt.run(k, JSON.stringify(v));
 }
 
+export function deleteSettings(...keys: string[]): void {
+  for (const k of keys) db.prepare('DELETE FROM settings WHERE key = ?').run(k);
+}
+
+/** A factory-wide secret (e.g. an API key), encrypted like card secrets; null removes it. */
+export function setSecretSetting(name: string, value: string | null): void {
+  if (value === null) deleteSettings(name);
+  else saveSettings({ [name]: seal(key, value) });
+}
+
+export function getSecretSetting(name: string): string | null {
+  const stored = loadSettings()[name];
+  return typeof stored === 'string' ? unseal(key, stored) : null;
+}
+
 // ---------------------------------------------------------------- projects
 
 export interface ProjectRow {
@@ -652,7 +688,7 @@ export function adoptOrphanCards(projectId: number): void {
 function toProfile(r: Row): AgentProfile {
   return {
     id: r.id, name: r.name, job: r.job, title: r.title ?? '', provider: r.provider ?? '', context: r.context, imageUrl: r.image_url ?? null, model: r.model,
-    skillIds: JSON.parse(r.skill_ids), budgetUsd: r.budget_usd ?? 0, budgetTokens: r.budget_tokens ?? 0, createdAt: r.created_at, archived: !!r.archived,
+    skillIds: JSON.parse(r.skill_ids), contextIds: JSON.parse(r.context_ids ?? '[]'), budgetUsd: r.budget_usd ?? 0, budgetTokens: r.budget_tokens ?? 0, createdAt: r.created_at, archived: !!r.archived,
   };
 }
 
@@ -671,24 +707,24 @@ export function getProfile(id: number): AgentProfile | undefined {
   return r && toProfile(r);
 }
 
-export type ProfileInput = Pick<AgentProfile, 'name' | 'job' | 'title' | 'provider' | 'context' | 'imageUrl' | 'model' | 'skillIds' | 'budgetUsd' | 'budgetTokens'>;
+export type ProfileInput = Pick<AgentProfile, 'name' | 'job' | 'title' | 'provider' | 'context' | 'imageUrl' | 'model' | 'skillIds' | 'contextIds' | 'budgetUsd' | 'budgetTokens'>;
 
 
 export function createProfile(input: ProfileInput): AgentProfile {
-  const res = db.prepare('INSERT INTO profiles (name, job, title, provider, context, image_url, model, skill_ids, budget_usd, budget_tokens, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-    .run(input.name, input.job, input.title, input.provider, input.context, input.imageUrl, input.model, JSON.stringify(input.skillIds), input.budgetUsd ?? 0, input.budgetTokens ?? 0, now());
+  const res = db.prepare('INSERT INTO profiles (name, job, title, provider, context, image_url, model, skill_ids, context_ids, budget_usd, budget_tokens, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(input.name, input.job, input.title, input.provider, input.context, input.imageUrl, input.model, JSON.stringify(input.skillIds), JSON.stringify(input.contextIds ?? []), input.budgetUsd ?? 0, input.budgetTokens ?? 0, now());
   return publishProfile(Number(res.lastInsertRowid))!;
 }
 
 export function updateProfile(id: number, input: ProfileInput): AgentProfile | undefined {
-  db.prepare('UPDATE profiles SET name = ?, job = ?, title = ?, provider = ?, context = ?, image_url = ?, model = ?, skill_ids = ?, budget_usd = ?, budget_tokens = ? WHERE id = ?')
-    .run(input.name, input.job, input.title, input.provider, input.context, input.imageUrl, input.model, JSON.stringify(input.skillIds), input.budgetUsd ?? 0, input.budgetTokens ?? 0, id);
+  db.prepare('UPDATE profiles SET name = ?, job = ?, title = ?, provider = ?, context = ?, image_url = ?, model = ?, skill_ids = ?, context_ids = ?, budget_usd = ?, budget_tokens = ? WHERE id = ?')
+    .run(input.name, input.job, input.title, input.provider, input.context, input.imageUrl, input.model, JSON.stringify(input.skillIds), JSON.stringify(input.contextIds ?? []), input.budgetUsd ?? 0, input.budgetTokens ?? 0, id);
   return publishProfile(id);
 }
 
 /** Archives a profile: it no longer works anywhere, but past activity still shows who did it. */
 export function archiveProfile(id: number): void {
-  db.prepare("UPDATE profiles SET archived = 1, skill_ids = '[]' WHERE id = ?").run(id);
+  db.prepare("UPDATE profiles SET archived = 1, skill_ids = '[]', context_ids = '[]' WHERE id = ?").run(id);
   publishProfile(id);
 }
 
@@ -740,10 +776,87 @@ export function deleteSkillRow(id: number): void {
   emit({ type: 'skill_removed', id });
 }
 
+// ---------------------------------------------------------------- contexts
+
+/** What a context needs to start: the client-safe fields plus its secret values. */
+export interface ContextInput {
+  name: string;
+  description: string;
+  transport: Context['transport'];
+  folder: string;
+  command: string;
+  args: string[];
+  cwd: string;
+  envPassthrough: string[];
+  url: string;
+  bearerTokenEnv: string;
+  envHeaders: Record<string, string>;
+  env: Record<string, string>;
+  headers: Record<string, string>;
+  readOnly: boolean;
+  enabled: boolean;
+}
+
+function toContext(r: Row): Context {
+  return {
+    id: r.id, name: r.name, description: r.description, transport: r.transport, folder: r.folder ?? '', command: r.command, args: JSON.parse(r.args), cwd: r.cwd ?? '',
+    envPassthrough: JSON.parse(r.env_passthrough ?? '[]'), url: r.url, bearerTokenEnv: r.bearer_env ?? '', envHeaders: JSON.parse(r.env_headers ?? '{}'),
+    envNames: JSON.parse(r.env_names), headerNames: JSON.parse(r.header_names), readOnly: !!r.read_only, enabled: r.enabled === undefined ? true : !!r.enabled, createdAt: r.created_at,
+  };
+}
+
+export function listContexts(): Context[] {
+  return (db.prepare('SELECT * FROM contexts ORDER BY name COLLATE NOCASE').all() as Row[]).map(toContext);
+}
+
+export function getContext(id: number): Context | undefined {
+  const r = db.prepare('SELECT * FROM contexts WHERE id = ?').get(id) as Row | undefined;
+  return r ? toContext(r) : undefined;
+}
+
+/** A context's environment and header values. Only for starting it; never for clients. */
+export function contextSecrets(id: number): { env: Record<string, string>; headers: Record<string, string> } {
+  const r = db.prepare('SELECT secrets FROM contexts WHERE id = ?').get(id) as Row | undefined;
+  const parsed = r ? JSON.parse(unseal(key, r.secrets)) : {};
+  return { env: parsed.env ?? {}, headers: parsed.headers ?? {} };
+}
+
+function contextValues(input: ContextInput) {
+  return [
+    input.name, input.description, input.transport, input.command, JSON.stringify(input.args), input.url,
+    seal(key, JSON.stringify({ env: input.env, headers: input.headers })), JSON.stringify(Object.keys(input.env)), JSON.stringify(Object.keys(input.headers)),
+    input.readOnly ? 1 : 0, input.enabled ? 1 : 0, input.cwd, JSON.stringify(input.envPassthrough), input.bearerTokenEnv, JSON.stringify(input.envHeaders), input.folder,
+  ];
+}
+
+function publishContext(id: number): Context | undefined {
+  const context = getContext(id);
+  if (context) emit({ type: 'context', context });
+  return context;
+}
+
+export function insertContext(input: ContextInput): Context {
+  const res = db.prepare(`INSERT INTO contexts (name, description, transport, command, args, url, secrets, env_names, header_names, read_only,
+    enabled, cwd, env_passthrough, bearer_env, env_headers, folder, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(...contextValues(input), now());
+  return publishContext(Number(res.lastInsertRowid))!;
+}
+
+export function updateContextRow(id: number, input: ContextInput): Context | undefined {
+  db.prepare(`UPDATE contexts SET name = ?, description = ?, transport = ?, command = ?, args = ?, url = ?, secrets = ?, env_names = ?, header_names = ?, read_only = ?,
+    enabled = ?, cwd = ?, env_passthrough = ?, bearer_env = ?, env_headers = ?, folder = ? WHERE id = ?`).run(...contextValues(input), id);
+  return publishContext(id);
+}
+
+export function deleteContextRow(id: number): void {
+  db.prepare('DELETE FROM contexts WHERE id = ?').run(id);
+  emit({ type: 'context_removed', id });
+}
+
 // ---------------------------------------------------------------- usage
 
-export function addUsage(input: Omit<UsageRecord, 'id' | 'ts'>): UsageRecord {
-  const ts = now();
+/** Records a run's usage; `ts` defaults to now (tests set it to fill past days). */
+export function addUsage(run: Omit<UsageRecord, 'id' | 'ts'> & { ts?: number }): UsageRecord {
+  const { ts = now(), ...input } = run;
   const res = db.prepare(
     `INSERT INTO usage (project_id, card_id, profile_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, ts)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -768,6 +881,21 @@ export function usageBy(column: 'project_id' | 'profile_id', projectId?: number,
     ? db.prepare(`SELECT ${column} AS k, ${TOTALS} FROM usage WHERE ${column} IS NOT NULL AND ts >= ? GROUP BY ${column}`).all(since)
     : db.prepare(`SELECT ${column} AS k, ${TOTALS} FROM usage WHERE ${column} IS NOT NULL AND project_id = ? AND ts >= ? GROUP BY ${column}`).all(projectId, since)) as Row[];
   return Object.fromEntries(rows.map((r) => [r.k, toTotals(r)]));
+}
+
+const usageScope = (projectId?: number) => (projectId == null ? '' : ' AND project_id = ?');
+const usageArgs = (since: number, projectId?: number) => (projectId == null ? [since] : [since, projectId]);
+
+/** Totals per local calendar day (YYYY-MM-DD) since a time, optionally for one project. */
+export function usageByDay(since: number, projectId?: number): (UsageTotals & { day: string })[] {
+  return (db.prepare(`SELECT date(ts / 1000, 'unixepoch', 'localtime') AS day, ${TOTALS} FROM usage WHERE ts >= ?${usageScope(projectId)} GROUP BY day ORDER BY day`)
+    .all(...usageArgs(since, projectId)) as Row[]).map((r) => ({ day: r.day, ...toTotals(r) }));
+}
+
+/** Totals per model since a time, optionally for one project. */
+export function usageByModel(since: number, projectId?: number): (UsageTotals & { model: string })[] {
+  return (db.prepare(`SELECT model, ${TOTALS} FROM usage WHERE ts >= ?${usageScope(projectId)} GROUP BY model ORDER BY c DESC, (i + o + cr + cw) DESC`)
+    .all(...usageArgs(since, projectId)) as Row[]).map((r) => ({ model: r.model, ...toTotals(r) }));
 }
 
 /** One project's or profile's totals since a time. */

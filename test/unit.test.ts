@@ -146,3 +146,38 @@ test('installed CLI versions are compared with the ones the parsers were checked
   assert.equal(compareVersion('2.1.294 (Claude Code)', null), null);
   assert.deepEqual(Object.keys(TESTED_VERSIONS).sort(), ['codex', 'opencode', 'pi'], 'every CLI driver has a tested version');
 });
+
+test('pasted MCP server configs fill in a context', async () => {
+  const { parseMcpConfig } = await import('../web/src/mcp-config.ts');
+  assert.deepEqual(parseMcpConfig(JSON.stringify({ mcpServers: { 'git hub': { type: 'stdio', command: 'npx', args: ['-y', '@modelcontextprotocol/server-github'], env: { GITHUB_TOKEN: 'x' }, cwd: '~/code' } } })), [{
+    name: 'git-hub', transport: 'stdio', command: 'npx', args: ['-y', '@modelcontextprotocol/server-github'], cwd: '~/code', url: '', env: { GITHUB_TOKEN: 'x' }, headers: {},
+    bearerTokenEnv: '', envHeaders: {},
+  }]);
+  assert.deepEqual(parseMcpConfig('{"kb":{"url":"http://127.0.0.1:3003/mcp","bearer_token_env_var":"KB_TOKEN","env_http_headers":{"X-Team":"TEAM_ID"}}}').map((s) => [s.bearerTokenEnv, s.envHeaders]),
+    [['KB_TOKEN', { 'X-Team': 'TEAM_ID' }]], "Codex's names for values from the environment");
+  assert.deepEqual(parseMcpConfig('{"docs":{"type":"http","url":"https://mcp.example.com/mcp","headers":{"Authorization":"Bearer t"}}}').map((s) => [s.name, s.transport, s.url, s.headers]),
+    [['docs', 'http', 'https://mcp.example.com/mcp', { Authorization: 'Bearer t' }]]);
+  assert.equal(parseMcpConfig('{"command":"uvx","args":["mcp-server-fetch"]}')[0].name, '', 'a lone server has no name');
+  assert.throws(() => parseMcpConfig('{oops'), /valid JSON/);
+  assert.throws(() => parseMcpConfig('{"mcpServers":{}}'), /No MCP server found/);
+});
+
+test("each OS's folder dialog command quotes the start folder and title safely", async () => {
+  const { dialogCommand } = await import('../server/native-dialog.ts');
+  const [mac, macArgs] = dialogCommand('/Users/me/My "odd" folder', 'Pick it', 'darwin')!;
+  assert.equal(mac, 'osascript');
+  assert.ok(macArgs.includes('set chosen to choose folder with prompt "Pick it" default location (POSIX file "/Users/me/My \\"odd\\" folder")'));
+  const [win, winArgs] = dialogCommand("C:\\Users\\O'Neil", 'Pick it', 'win32')!;
+  assert.equal(win, 'powershell');
+  assert.match(winArgs.at(-1)!, /\$d\.SelectedPath = 'C:\\Users\\O''Neil'/);
+  const display = process.env.DISPLAY;
+  const wayland = process.env.WAYLAND_DISPLAY;
+  delete process.env.DISPLAY;
+  delete process.env.WAYLAND_DISPLAY;
+  try {
+    assert.equal(dialogCommand('/home/me', 'Pick it', 'linux'), null, 'no display, no dialog');
+  } finally {
+    if (display !== undefined) process.env.DISPLAY = display;
+    if (wayland !== undefined) process.env.WAYLAND_DISPLAY = wayland;
+  }
+});

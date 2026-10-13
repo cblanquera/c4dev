@@ -12,6 +12,7 @@ import { ProcessPopover } from './components/ProcessPopover.tsx';
 import { DirectoryContext, ProjectScope, teamProviders } from './agents.ts';
 import { go, goHome } from './nav.ts';
 import { ACTIVE_STAGES, STAGE_LABELS } from '../../server/types.ts';
+import { FactoryLogo, ProjectLogo } from './components/ProjectLogo.tsx';
 
 /**
  * Routing lives in the URL hash. No hash is home: projects beside the
@@ -38,7 +39,7 @@ function parseHash(hash: string): Route {
   if (m) return { view: 'board', projectId: null, panel: { kind: 'new', parentId: Number(m[1]) } };
   m = hash.match(/^#project-(\d+)(\/new)?$/);
   if (m) return { view: 'board', projectId: Number(m[1]), panel: m[2] ? { kind: 'new', parentId: null } : NO_PANEL };
-  m = hash.match(/^#settings(?:\/(assistant|agents|skills|providers|limits|data))?$/);
+  m = hash.match(/^#settings(?:\/(assistant|agents|skills|contexts|providers|usage|limits|data))?$/);
   if (m) return { view: 'settings', section: (!m[1] || m[1] === 'assistant' ? 'agents' : m[1]) as SettingsSection, panel: NO_PANEL };
   return { view: 'home', panel: NO_PANEL };
 }
@@ -47,9 +48,6 @@ function parseHash(hash: string): Route {
 /** Id of the newest assistant message read on the home screen, per browser. */
 const SEEN_KEY = 'factory.assistantSeen';
 
-const Logo = () => (
-  <svg viewBox="0 0 32 32" width="22" height="22" role="img" aria-label="Software Factory"><rect width="32" height="32" rx="7" fill="var(--accent)" /><path d="M8 22V12l5 3v-3l5 3v-3l6 4v6z" fill="white" /></svg>
-);
 
 export function App() {
   const [route, setRoute] = useState<Route>(() => parseHash(location.hash));
@@ -59,7 +57,7 @@ export function App() {
   const [seen, setSeen] = useState(() => Number(localStorage.getItem(SEEN_KEY) ?? 0));
   const { panel } = route;
   const openId = panel.kind === 'card' ? panel.id : null;
-  const { cardList, cards, projects, projectList, profiles, profileList, skills, usage, limits, providers, projectDefaults, assistant, feed, detail, connected } = useFactory(openId);
+  const { cardList, cards, projects, projectList, profiles, profileList, skills, contexts, usage, usageVersion, limits, jev, providers, projectDefaults, assistant, feed, detail, connected } = useFactory(openId);
   const [syncing, setSyncing] = useState(false);
 
   // A card knows its project, so #card-12 links work from any board or the assistant.
@@ -132,8 +130,8 @@ export function App() {
       {route.view === 'home' || route.view === 'settings' || missingBoard ? (
         <header className="topbar">
           {route.view === 'settings'
-            ? <a className="brand home-link" href="#" onClick={(e) => { e.preventDefault(); goHome(); }} aria-label="All projects" title="All projects"><Logo /></a>
-            : <div className="brand"><Logo /></div>}
+            ? <a className="brand home-link" href="#" onClick={(e) => { e.preventDefault(); goHome(); }} aria-label="All projects" title="All projects"><FactoryLogo /></a>
+            : <div className="brand"><FactoryLogo /></div>}
           {route.view === 'settings' && <h1 className="topbar-title">Settings</h1>}
           <span className={`conn ${connected ? 'on' : 'off'}`} title={connected ? 'Live' : 'Reconnecting…'} />
           <div className="top-actions">
@@ -143,10 +141,11 @@ export function App() {
         </header>
       ) : project && (
         <header className="topbar">
-          <a className="brand home-link" href="#" onClick={(e) => { e.preventDefault(); goHome(); }} aria-label={unseen ? 'All projects (new assistant messages)' : 'All projects'} title="All projects">
-            <Logo />
+          <a className="ghost home-link back-link" href="#" onClick={(e) => { e.preventDefault(); goHome(); }} aria-label={unseen ? 'All projects (new assistant messages)' : 'All projects'} title="All projects">
+            <Icon name="arrow-left" />
             {unseen && <span className="dot-unread" />}
           </a>
+          <span className="brand"><ProjectLogo url={project.settings.logoUrl} name={project.name} /></span>
           <h1 className="topbar-title">{project.name}</h1>
           <div className="coord">
             <span className={`conn ${connected ? 'on' : 'off'}`} title={connected ? 'Live' : 'Reconnecting…'} />
@@ -186,8 +185,8 @@ export function App() {
           onNewProject={() => setDialog('new-project')} onCardClick={openCard} onError={onError} />
       )}
       {route.view === 'settings' && (
-        <SettingsPage section={route.section} profiles={profileList} skills={skills} projects={projectList} usage={usage.byProfile} monthUsage={usage.month.byProfile}
-          limits={limits} providers={providers} onError={onError} />
+        <SettingsPage section={route.section} profiles={profileList} skills={skills} contexts={contexts} projects={projectList} usage={usage.byProfile} monthUsage={usage.month.byProfile}
+          limits={limits} providers={providers} jev={jev} usageVersion={usageVersion} onError={onError} />
       )}
       {route.view === 'board' && project && (
         <Board key={project.id} projectId={project.id} cards={projectCards} settings={project.settings} selectedId={openId} onOpen={openCard} onNew={() => go(`#project-${project.id}/new`)} onError={onError} />
@@ -237,7 +236,7 @@ export function App() {
       )}
 
       {dialog === 'project' && project && (
-        <SettingsDialog project={project} defaults={projectDefaults} profiles={profileList} monthUsage={usage.month.byProject[project.id]} onClose={() => setDialog(null)} onSaved={() => setDialog(null)} onError={onError} />
+        <SettingsDialog project={project} defaults={projectDefaults} profiles={profileList} monthUsage={usage.month.byProject[project.id]} usageVersion={usageVersion} onClose={() => setDialog(null)} onSaved={() => setDialog(null)} onError={onError} />
       )}
       {dialog === 'new-project' && (
         <SettingsDialog project={null} defaults={projectDefaults} profiles={profileList} onClose={() => setDialog(null)} onSaved={(p) => { setDialog(null); go(`#project-${p.id}`); }} onError={onError} />

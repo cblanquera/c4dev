@@ -11,6 +11,7 @@ import { DATA_DIR, listProjects, runLimits, settings, updateSettings } from './s
 import { HttpError } from './errors.ts';
 import { assertUsable } from './providers.ts';
 import { agentOverBudget, cleanBudget } from './budget.ts';
+import { runContexts, type RunContext } from './contexts.ts';
 import { AGENT_JOBS, JOB_LABELS, PROVIDERS, type AgentJob, type AgentProfile, type DriverName, type RunLimits, type Skill, type Subtask } from './types.ts';
 
 const SKILLS_DIR = path.join(DATA_DIR, 'skills');
@@ -48,15 +49,17 @@ export interface RunProfile {
   pluginDir: string | null;
   /** Caps on the run; drivers stop a run that reaches one and report it as a failure. */
   limits: RunLimits;
+  /** The agent's MCP servers, secrets included; drivers start what the run's access allows (`contextsFor`). */
+  contexts: RunContext[];
 }
 
 export function seedProfiles(): void {
   if (!db.listProfiles().length) {
-    for (const p of DEFAULT_PROFILES) db.createProfile({ ...p, provider: 'simulated', imageUrl: null, model: '', skillIds: [], budgetUsd: 0, budgetTokens: 0 });
+    for (const p of DEFAULT_PROFILES) db.createProfile({ ...p, provider: 'simulated', imageUrl: null, model: '', skillIds: [], contextIds: [], budgetUsd: 0, budgetTokens: 0 });
   }
   // The assistant always runs as someone.
   if (!db.profilesWithJob('assistant').length) {
-    db.createProfile({ ...DEFAULT_PROFILES.find((p) => p.job === 'assistant')!, provider: 'simulated', imageUrl: null, model: '', skillIds: [], budgetUsd: 0, budgetTokens: 0 });
+    db.createProfile({ ...DEFAULT_PROFILES.find((p) => p.job === 'assistant')!, provider: 'simulated', imageUrl: null, model: '', skillIds: [], contextIds: [], budgetUsd: 0, budgetTokens: 0 });
   }
   migrateProviders();
 }
@@ -214,6 +217,7 @@ function cleanInput(input: Partial<db.ProfileInput>): db.ProfileInput {
   if (!name) throw new HttpError(400, 'A profile needs a name');
   if (!AGENT_JOBS.includes(input.job as AgentJob)) throw new HttpError(400, 'Unknown job');
   const known = new Set(db.listSkills().map((s) => s.id));
+  const knownContexts = new Set(db.listContexts().map((c) => c.id));
   const provider = (input.provider || 'simulated') as DriverName;
   assertUsable(provider);
   const imageUrl = typeof input.imageUrl === 'string' && /^\/uploads\/[\w.-]+$/.test(input.imageUrl) ? input.imageUrl : null;
@@ -226,6 +230,7 @@ function cleanInput(input: Partial<db.ProfileInput>): db.ProfileInput {
     imageUrl,
     model: String(input.model ?? '').trim(),
     skillIds: [...new Set((input.skillIds ?? []).map(Number))].filter((id) => known.has(id)),
+    contextIds: [...new Set((input.contextIds ?? []).map(Number))].filter((id) => knownContexts.has(id)),
     budgetUsd: cleanBudget(input.budgetUsd, 'usd'),
     budgetTokens: cleanBudget(input.budgetTokens, 'tokens'),
   };
@@ -324,5 +329,6 @@ export function runProfile(profile: AgentProfile): RunProfile {
     id: profile.id, name: profile.name, job: profile.job, title: profile.title || JOB_LABELS[profile.job], context: profile.context, model: profile.model, skills,
     pluginDir: skills.length && fs.existsSync(dir) ? dir : null,
     limits: runLimits(),
+    contexts: runContexts(profile),
   };
 }

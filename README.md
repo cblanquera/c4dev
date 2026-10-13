@@ -143,6 +143,9 @@ e2e/                Playwright acceptance tests by journey/use case, desktop + m
 
 - **Node 24+** (developed on 26). TypeScript runs directly through Node's type stripping, with no build step for the server.
 - State lives in `.factory/` (database, uploads, worktrees). Set `FACTORY_DATA` to move it and `PORT` to change the port.
+- Agents can be given contexts (Settings → Contexts): MCP servers (paste a server's JSON config, Test connection, then attach it in the agent's Contexts tab; secret values are encrypted; read-only roles only get contexts marked read-only; Pi doesn't support MCP), or a **Local Folder** of Markdown knowledge starting at its `AGENTS.md` or `CONTEXT.md`, which every provider reads directly.
+- Optional: add Jev (TypeSafe's decision model) in Settings → Providers with your TypeSafe API key. Routine decisions then skip full LLM runs when Jev is confident; without it, everything works as before.
+- See tokens and estimated cost per day and per model in Settings → Usage (all projects) or a project's settings → Usage.
 - Runs are capped at 200 turns and 60 minutes each by default (Settings → Limits). Monthly budgets per project (project settings → Team) and per agent (the agent's Usage tab) stop new runs once reached.
 - Card secrets are encrypted with the key in `.factory/secret.key` (or `FACTORY_SECRET_KEY`, 32 bytes in base64). Keep a copy: without it, stored secrets can't be read. The database is backed up to `.factory/backups/` before upgrades and from Settings → Data, which also exports and imports your skills, agents and project settings.
 - Only the factory's own page can use its API: requests must be addressed to localhost, can't come from other sites, and need the token in `.factory/auth-token`, which the page receives automatically. To script the API, send that token as the `X-Factory-Token` header.

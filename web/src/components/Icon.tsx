@@ -2,7 +2,7 @@
 import {
   ArrowDownToLine, ArrowLeft, ArrowRight, ArrowUpFromLine, Bell, GitMerge, Check, Circle, CircleAlert, CircleCheck, CircleHelp,
   CircleX, Copy, CornerDownRight, ChevronDown, ChevronRight, Hash, ImagePlus, Kanban, KeyRound, Link, Unlink,
-  LoaderCircle, Maximize2, Minimize2, Plus, RotateCcw, Settings, Sparkles, Square, Terminal, X,
+  LoaderCircle, Maximize2, Minimize2, Plug, Plus, RotateCcw, Settings, Sparkles, Square, Terminal, Trash2, X,
 } from 'lucide-react';
 
 const ICONS = {
@@ -30,12 +30,14 @@ const ICONS = {
   'loader-circle': LoaderCircle,
   'maximize-2': Maximize2,
   'minimize-2': Minimize2,
+  plug: Plug,
   plus: Plus,
   'rotate-ccw': RotateCcw,
   settings: Settings,
   sparkles: Sparkles,
   square: Square,
   terminal: Terminal,
+  trash: Trash2,
   unlink: Unlink,
   x: X,
 };

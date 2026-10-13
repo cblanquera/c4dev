@@ -28,6 +28,9 @@ const { git } = await import('../server/shell.ts');
 
 let server: Server;
 let base: string;
+/** The stand-in OS folder dialog: what it was asked, and what it answers next. */
+const dialogs: { start: string; title: string }[] = [];
+let nextDialog: { path: string | null; supported: true } | { path: null; supported: false } = { path: null, supported: true };
 const token = 'test-token-0123456789abcdef0123456789abcdef';
 let factory: InstanceType<typeof Factory>;
 let assistant: InstanceType<typeof Assistant>;
@@ -47,7 +50,10 @@ async function api(method: string, url: string, body?: unknown) {
   return { status: res.status, body: text ? JSON.parse(text.split('\n').filter(Boolean).at(-1)!) : null, raw: text };
 }
 
-async function waitFor(cardId: number, pred: (c: any) => boolean, ms = 30_000) {
+// These journeys spawn real git and test processes; busy hosts need time to finish them.
+const JOURNEY_WAIT_MS = 90_000;
+
+async function waitFor(cardId: number, pred: (c: any) => boolean, ms = JOURNEY_WAIT_MS) {
   const end = Date.now() + ms;
   while (Date.now() < end) {
     const card = db.getCard(cardId)!;
@@ -57,7 +63,7 @@ async function waitFor(cardId: number, pred: (c: any) => boolean, ms = 30_000) {
   throw new Error(`Timed out; card #${cardId} is ${JSON.stringify(db.getCard(cardId))}`);
 }
 
-async function until<T>(fn: () => T | null | undefined | false, ms = 30_000): Promise<T> {
+async function until<T>(fn: () => T | null | undefined | false, ms = JOURNEY_WAIT_MS): Promise<T> {
   const end = Date.now() + ms;
   while (Date.now() < end) {
     const value = fn();
@@ -114,7 +120,7 @@ before(async () => {
     managedProcesses = managedProcesses.filter((item) => String(item.port) !== args[1]);
     return '';
   });
-  server = createApp(factory, assistant, { token, processes }).listen(0);
+  server = createApp(factory, assistant, { token, processes, chooseFolder: async (start, title) => { dialogs.push({ start, title }); return nextDialog; } }).listen(0);
   base = `http://localhost:${(server.address() as AddressInfo).port}`;
   factory.start();
   assistant.start();
@@ -853,4 +859,357 @@ test('run limits are factory-wide settings that every run receives', async () =>
   assert.equal((await api('PATCH', '/api/limits', { runMinutes: 0 })).status, 400);
   assert.equal((await api('PATCH', '/api/limits', { maxTurns: 2.5 })).status, 400);
   await api('PATCH', '/api/limits', { maxTurns: 200 });
+});
+
+// ---------------------------------------------------------------- contexts (MCP servers)
+
+test('contexts are MCP servers agents can be given, with secrets that never leave the server', async () => {
+  const server = path.resolve('test/fixtures/mcp-server.mjs');
+  const created = await api('POST', '/api/contexts', {
+    name: 'secrets', description: 'The secret word', transport: 'stdio', command: process.execPath, args: [server], env: { SECRET_WORD: 'pelican-42' },
+  });
+  assert.equal(created.status, 201, created.raw);
+  const id = created.body.id;
+  assert.deepEqual([created.body.envNames, created.body.readOnly], [['SECRET_WORD'], false]);
+  assert.ok(!created.raw.includes('pelican-42'), 'values never go back to clients');
+  assert.ok(!(await api('GET', '/api/state')).raw.includes('pelican-42'));
+  assert.ok(!(await api('GET', '/api/export')).raw.includes('pelican-42'));
+
+  // Check starts it and lists its tools.
+  const checked = await api('POST', `/api/contexts/${id}/check`);
+  assert.deepEqual(checked.body, { server: 'test-secrets 1.0.0', tools: ['secret_word'] });
+  const broken = (await api('POST', '/api/contexts', { name: 'broken', transport: 'stdio', command: 'definitely-not-a-command-xyz' })).body;
+  const failed = await api('POST', `/api/contexts/${broken.id}/check`);
+  assert.equal(failed.status, 502);
+  assert.match(failed.body.error, /^broken didn't answer: couldn't start definitely-not-a-command-xyz/);
+  await api('DELETE', `/api/contexts/${broken.id}`);
+
+  // Editing keeps a saved value when it's sent as null, and refuses one that was never saved.
+  assert.equal((await api('PATCH', `/api/contexts/${id}`, { description: 'Renamed', env: { SECRET_WORD: null } })).status, 200);
+  assert.deepEqual(db.contextSecrets(id).env, { SECRET_WORD: 'pelican-42' });
+  assert.equal((await api('PATCH', `/api/contexts/${id}`, { env: { OTHER: null } })).status, 400);
+  for (const bad of [{ name: 'has space' }, { name: 'factory' }, { name: 'SECRETS' }, { name: 'web', transport: 'http', url: 'ftp://x' }]) {
+    assert.ok([400, 409].includes((await api('POST', '/api/contexts', { command: 'x', ...bad })).status), JSON.stringify(bad));
+  }
+
+  // Agents attach contexts; workers get them all, read-only runs only read-only ones.
+  const { runProfile } = await import('../server/profiles.ts');
+  const { contextsFor } = await import('../server/agents/driver.ts');
+  const alex = db.activeProfiles().find((p) => p.name === 'Alex')!;
+  const attached = await api('PATCH', `/api/profiles/${alex.id}`, { contextIds: [id, 9999] });
+  assert.deepEqual(attached.body.contextIds, [id], 'unknown contexts are dropped');
+  const run = runProfile(db.getProfile(alex.id)!);
+  assert.deepEqual(run.contexts.map((c) => [c.name, c.env.SECRET_WORD]), [['secrets', 'pelican-42']]);
+  assert.equal(contextsFor(run, true).length, 1);
+  assert.equal(contextsFor(run, false).length, 0, 'not read-only, so planners and reviewers never get it');
+  await api('PATCH', `/api/contexts/${id}`, { readOnly: true });
+  assert.equal(contextsFor(runProfile(db.getProfile(alex.id)!), false).length, 1);
+
+  // Workers say which contexts they have.
+  await api('PATCH', `/api/projects/${DEMO}`, { settings: { team: [alex.id, ...db.activeProfiles().filter((p) => p.job !== 'developer').map((p) => p.id)] } });
+  const card = await queueCard('# Use the secret word\n\n- write it into notes.md');
+  await waitFor(card, (c) => db.listLogs(c.id).some((l) => l.text === 'Using contexts: secrets'));
+  await api('POST', `/api/cards/${card}/abort`);
+  await api('PATCH', `/api/projects/${DEMO}`, { settings: { team: [] } });
+
+  // Deleting a context detaches it from every agent.
+  assert.equal((await api('DELETE', `/api/contexts/${id}`)).status, 204);
+  assert.deepEqual(db.getProfile(alex.id)!.contextIds, []);
+});
+
+test('a context reached over HTTP is checked with its headers', async () => {
+  // A minimal streamable-HTTP MCP server that wants a bearer token and answers in an event stream.
+  const mcp = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (d) => { body += d; });
+    req.on('end', () => {
+      if (req.headers.authorization !== 'Bearer t0ken') return res.writeHead(401).end();
+      const msg = JSON.parse(body);
+      if (msg.id === undefined) return res.writeHead(202).end();
+      const result = msg.method === 'initialize'
+        ? { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'docs', version: '2' } }
+        : { tools: [{ name: 'search' }, { name: 'fetch' }] };
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'mcp-session-id': 's1' }).end(`event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', id: msg.id, result })}\n\n`);
+    });
+  }).listen(0);
+  const url = `http://localhost:${(mcp.address() as AddressInfo).port}/mcp`;
+  try {
+    const created = (await api('POST', '/api/contexts', { name: 'docs', transport: 'http', url, headers: { Authorization: 'Bearer t0ken' }, readOnly: true })).body;
+    assert.deepEqual(created.headerNames, ['Authorization']);
+    assert.deepEqual((await api('POST', `/api/contexts/${created.id}/check`)).body, { server: 'docs 2', tools: ['search', 'fetch'] });
+    await api('PATCH', `/api/contexts/${created.id}`, { headers: { Authorization: 'Bearer wrong' } });
+    const denied = await api('POST', `/api/contexts/${created.id}/check`);
+    assert.match(denied.body.error, /HTTP 401 \(check the headers/);
+    await api('DELETE', `/api/contexts/${created.id}`);
+  } finally {
+    mcp.close();
+  }
+});
+
+test('contexts take values from the factory environment, start in their working directory and can be switched off', async () => {
+  const { resolveContext, runContexts } = await import('../server/contexts.ts');
+  const server = path.resolve('test/fixtures/mcp-server.mjs');
+  process.env.FACTORY_TEST_WORD = 'from-the-environment';
+  process.env.FACTORY_TEST_TOKEN = 't0k';
+  try {
+    // Passthrough: the server gets the factory's own variable by name, and Check reaches it.
+    const passed = (await api('POST', '/api/contexts', { name: 'passthrough', transport: 'stdio', command: process.execPath, args: [server], envPassthrough: ['FACTORY_TEST_WORD'] })).body;
+    assert.deepEqual(passed.envPassthrough, ['FACTORY_TEST_WORD']);
+    const run = resolveContext(db.getContext(passed.id)!);
+    assert.equal(run.env.FACTORY_TEST_WORD, 'from-the-environment');
+    assert.deepEqual(run.missing, []);
+
+    // A working directory wraps the command, so every provider starts it there.
+    await api('PATCH', `/api/contexts/${passed.id}`, { cwd: '~' });
+    const wrapped = resolveContext(db.getContext(passed.id)!);
+    assert.deepEqual([wrapped.command, wrapped.args.slice(2)], ['/bin/sh', ['sh', os.homedir(), process.execPath, server]]);
+    assert.deepEqual((await api('POST', `/api/contexts/${passed.id}/check`)).body.tools, ['secret_word']);
+
+    // A variable the factory doesn't have is named when the check fails.
+    const broken = (await api('POST', '/api/contexts', { name: 'unset', transport: 'stdio', command: 'definitely-not-a-command-xyz', envPassthrough: ['FACTORY_TEST_NOPE'] })).body;
+    assert.match((await api('POST', `/api/contexts/${broken.id}/check`)).body.error, /not set in the factory's environment: FACTORY_TEST_NOPE/);
+
+    // HTTP: a bearer token and headers from the environment, beside saved headers.
+    const web = (await api('POST', '/api/contexts', {
+      name: 'web', transport: 'http', url: 'http://127.0.0.1:9/mcp', bearerTokenEnv: 'FACTORY_TEST_TOKEN', envHeaders: { 'X-Word': 'FACTORY_TEST_WORD' }, headers: { 'X-Saved': 's' },
+    })).body;
+    assert.deepEqual(resolveContext(db.getContext(web.id)!).headers, { Authorization: 'Bearer t0k', 'X-Word': 'from-the-environment', 'X-Saved': 's' });
+    assert.equal((await api('POST', '/api/contexts', { name: 'bad-env', transport: 'http', url: 'http://x/mcp', bearerTokenEnv: 'not valid' })).status, 400);
+
+    // Switched off, it stays attached but no run starts it.
+    const alex = db.activeProfiles().find((p) => p.name === 'Alex')!;
+    await api('PATCH', `/api/profiles/${alex.id}`, { contextIds: [passed.id, web.id] });
+    assert.deepEqual(runContexts(db.getProfile(alex.id)!).map((c) => c.name), ['passthrough', 'web']);
+    assert.equal((await api('PATCH', `/api/contexts/${web.id}`, { enabled: false })).body.enabled, false);
+    assert.deepEqual(runContexts(db.getProfile(alex.id)!).map((c) => c.name), ['passthrough']);
+    assert.deepEqual(db.getProfile(alex.id)!.contextIds, [passed.id, web.id], 'still attached');
+
+    for (const id of [passed.id, broken.id, web.id]) await api('DELETE', `/api/contexts/${id}`);
+  } finally {
+    delete process.env.FACTORY_TEST_WORD;
+    delete process.env.FACTORY_TEST_TOKEN;
+  }
+});
+
+test('a local folder is a context agents read from its AGENTS.md or CONTEXT.md, without any server', async () => {
+  const { runProfile } = await import('../server/profiles.ts');
+  const { contextsFor } = await import('../server/agents/driver.ts');
+  const { profileBrief } = await import('../server/prompts.ts');
+  const kb = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-kb-'));
+  const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-kb-empty-'));
+  try {
+    fs.mkdirSync(path.join(kb, '.agents', 'context'), { recursive: true });
+    fs.writeFileSync(path.join(kb, '.agents', 'AGENTS.md'), '# Knowledge\n\n- Product facts: [product](context/product.md)\n');
+    fs.writeFileSync(path.join(kb, '.agents', 'context', 'product.md'), '# Product\n\nThe launch codename is ORCHID-913.\n');
+
+    // It needs an entry document; .agents/ (the ChrisAI Agent Workspace) counts.
+    assert.match((await api('POST', '/api/contexts', { name: 'nokb', transport: 'folder', folder: empty })).body.error, /has no AGENTS\.md, CONTEXT\.md/);
+    assert.match((await api('POST', '/api/contexts', { name: 'nokb', transport: 'folder', folder: path.join(empty, 'missing') })).body.error, /^No folder at/);
+    const created = await api('POST', '/api/contexts', { name: 'kb', transport: 'folder', folder: kb, readOnly: false });
+    assert.equal(created.status, 201, created.raw);
+    assert.equal(created.body.readOnly, true, 'agents only read it, so every role may have it');
+    assert.deepEqual((await api('POST', `/api/contexts/${created.body.id}/check`)).body, { server: '.agents/AGENTS.md', tools: [], files: 2 });
+
+    // The entry document goes into every run's instructions, read-only roles included.
+    const grace = db.activeProfiles().find((p) => p.name === 'Grace Hopper')!;
+    await api('PATCH', `/api/profiles/${grace.id}`, { contextIds: [created.body.id] });
+    const run = runProfile(db.getProfile(grace.id)!);
+    assert.equal(contextsFor(run, false).length, 1);
+    const brief = profileBrief(run);
+    assert.match(brief, /## Project knowledge: kb/);
+    assert.ok(brief.includes(path.join(kb, '.agents', 'AGENTS.md')) && brief.includes('[product](context/product.md)'));
+    assert.match(brief, /Never edit files in that folder/);
+    assert.ok(!brief.includes('ORCHID-913'), 'linked files are read when needed, not inlined');
+
+    // A root AGENTS.md wins over .agents/, and a long one is cut with a note.
+    fs.writeFileSync(path.join(kb, 'AGENTS.md'), `# Root\n${'x'.repeat(30_000)}`);
+    const long = profileBrief(runProfile(db.getProfile(grace.id)!));
+    assert.ok(long.includes(path.join(kb, 'AGENTS.md')) && long.includes('cut at 24000 characters'));
+    // Switched off, it leaves the brief.
+    await api('PATCH', `/api/contexts/${created.body.id}`, { enabled: false });
+    assert.doesNotMatch(profileBrief(runProfile(db.getProfile(grace.id)!)), /Project knowledge/);
+
+    await api('DELETE', `/api/contexts/${created.body.id}`);
+    assert.deepEqual(db.getProfile(grace.id)!.contextIds, []);
+  } finally {
+    fs.rmSync(kb, { recursive: true, force: true });
+    fs.rmSync(empty, { recursive: true, force: true });
+  }
+});
+
+test("Choose… opens this machine's own folder dialog, starting at the nearest folder that exists", async () => {
+  nextDialog = { path: '/Users/someone/code/shop', supported: true };
+  const chosen = await api('POST', '/api/fs/choose-folder', { start: path.join(repo, 'no', 'such', 'folder'), title: 'Choose the project folder' });
+  assert.deepEqual(chosen.body, { path: '/Users/someone/code/shop', supported: true });
+  assert.deepEqual(dialogs.at(-1), { start: repo, title: 'Choose the project folder' });
+  await api('POST', '/api/fs/choose-folder', { start: '' });
+  assert.equal(dialogs.at(-1)!.start, os.homedir(), 'nothing typed starts at home');
+  // Cancelling, and machines without a dialog (the page then shows its own picker).
+  nextDialog = { path: null, supported: true };
+  assert.deepEqual((await api('POST', '/api/fs/choose-folder', {})).body, { path: null, supported: true });
+  nextDialog = { path: null, supported: false };
+  assert.deepEqual((await api('POST', '/api/fs/choose-folder', {})).body, { path: null, supported: false });
+});
+
+test('a project logo is an uploaded image or a link, and travels inside exports', async () => {
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');
+  const upload = await fetch(`${base}/api/uploads`, { method: 'POST', headers: { 'content-type': 'image/png', 'x-factory-token': token }, body: png });
+  const { url } = await upload.json();
+  for (const ok of [url, 'https://cdn.example.com/logo.svg', '']) {
+    assert.equal((await api('PATCH', `/api/projects/${DEMO}`, { settings: { logoUrl: ok } })).status, 200, ok);
+  }
+  for (const bad of ['javascript:alert(1)', 'logo.png', 'ftp://x/logo.png', '/uploads/../secret.key']) {
+    assert.equal((await api('PATCH', `/api/projects/${DEMO}`, { settings: { logoUrl: bad } })).status, 400, bad);
+  }
+  // Exported as the image itself, so it survives the move to another machine.
+  await api('PATCH', `/api/projects/${DEMO}`, { settings: { logoUrl: url } });
+  const exported = (await api('GET', '/api/export')).body;
+  const demo = exported.projects.find((p: any) => p.settings.repoPath === repo);
+  assert.match(demo.settings.logoUrl, /^data:image\/png;base64,/);
+  await api('PATCH', `/api/projects/${DEMO}`, { settings: { logoUrl: '' } });
+  assert.equal((await api('POST', '/api/import', exported)).status, 200);
+  assert.match(settingsOf(DEMO).logoUrl, /^\/uploads\/[\w-]+\.png$/);
+  await api('PATCH', `/api/projects/${DEMO}`, { settings: { logoUrl: '' } });
+});
+
+// ---------------------------------------------------------------- Jev (optional decision model)
+
+test('Jev is optional: added with a checked key it settles routine decisions, and without it everything works as before', async () => {
+  // A stand-in TypeSafe API: GET /v1/models checks the key, POST /v1/systemone answers from `respond`.
+  type Q = Record<string, { type: string }>;
+  let respond: (questions: Q) => Record<string, unknown> | null = () => null;
+  const asked: Q[] = [];
+  const fake = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (d) => { body += d; });
+    req.on('end', () => {
+      if (req.headers.authorization !== 'Bearer good-key') return res.writeHead(401).end();
+      if (req.url === '/v1/models') return res.writeHead(200, { 'content-type': 'application/json' }).end('{"models":[{"name":"jev-latest"}]}');
+      const { questions } = JSON.parse(body);
+      asked.push(questions);
+      const answers = respond(questions);
+      if (!answers) return res.writeHead(500).end();
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ model: 'jev-1', answers, usage: { input_tokens: 40, output_tokens: 2 } }));
+    });
+  }).listen(0);
+  process.env.TYPESAFE_BASE_URL = `http://localhost:${(fake.address() as AddressInfo).port}`;
+  const ada = db.activeProfiles().find((p) => p.job === 'assistant')!;
+  const adaRuns = () => db.usageOf('profile_id', ada.id, 0).runs;
+  const noul = (p: number) => ({ type: 'noul', noul: p });
+  try {
+    // Without Jev, the Status button is still answered from the boards, with no model run.
+    assert.equal((await api('GET', '/api/state')).body.jev.configured, false);
+    let runs = adaRuns();
+    const { STATUS_QUESTION } = await import('../server/types.ts');
+    const status = await ask(STATUS_QUESTION);
+    assert.match(status.find((m) => m.kind === 'message')!.body, /\*\*Demo project\*\*/);
+    assert.equal(adaRuns(), runs, 'no assistant run for Status');
+
+    // Adding it checks the key; the key never reaches clients or exports.
+    const refused = await api('PUT', '/api/jev', { apiKey: 'bad-key' });
+    assert.deepEqual([refused.status, refused.body.error], [400, 'TypeSafe refused that API key']);
+    assert.deepEqual((await api('PUT', '/api/jev', { apiKey: 'good-key' })).body, { configured: true, enabled: true, model: 'jev-latest' });
+    assert.ok(!(await api('GET', '/api/state')).raw.includes('good-key') && !(await api('GET', '/api/export')).raw.includes('good-key'));
+
+    // A description too vague to work from comes back before the instructions run, unless the user insists.
+    respond = (q) => (q.specificity ? { specificity: { type: 'score', score: 0.1, confidence: 0.95 } } : null);
+    const vague = await api('POST', '/api/instructions', { description: 'Fix it', projectId: DEMO });
+    assert.equal(vague.body.type, 'vague');
+    assert.equal((await api('POST', '/api/instructions', { description: 'Fix it', projectId: DEMO, force: true })).body.type, 'done');
+
+    // A status question in other words is recognised and answered without the assistant's model.
+    respond = (q) => (q.status ? { status: noul(0.91), project: { type: 'choice', choice: 'all', confidence: 0.99, probabilities: {} } } : null);
+    runs = adaRuns();
+    assert.match((await ask('how are things looking?')).find((m) => m.kind === 'message')!.body, /\*\*Demo project\*\*/);
+    assert.equal(adaRuns(), runs);
+    assert.ok(asked.some((q) => q.status), 'Jev was asked');
+
+    // A small card skips planning, and a confident "nothing needs a human" skips the approval run:
+    // without Jev the simulated coordinator would ask for approval because the description says "review".
+    respond = (q) => (q.single_change ? { single_change: noul(0.96) }
+      : q.credentials ? { credentials: noul(0.02), sensitive: noul(0.03), open_ux: noul(0.05), assumptions: noul(0.04), review_requested: noul(0.08) }
+      : q.specificity ? { specificity: { type: 'score', score: 2.8, confidence: 0.9 } } : null);
+    const id = await queueCard('# Review the footer copy\n\nUpdate the footer text to say "Made with care" and review it.');
+    const done = await waitFor(id, (c) => c.stage === 'complete' && c.worktree === null, 60_000);
+    assert.equal(done.deliverableKind, null);
+    const logs = db.listLogs(id).map((l) => l.text);
+    assert.ok(logs.includes('Jev: a single small change, so no planning run'));
+    assert.ok(logs.some((t) => /^Approval needed: no\. Jev found nothing that needs a human/.test(t)), logs.join('\n'));
+    assert.equal(db.listSubtasks(id).filter((s) => s.kind === 'build').length, 1);
+    // Both Jev calls (planning, approval) are charged to the card at TypeSafe's estimate:
+    // $0.042 per million input tokens, output free. Simulated runs cost nothing.
+    assert.ok(Math.abs(db.cardUsage(id).costUsd - 2 * 40 * 0.042 / 1_000_000) < 1e-12, String(db.cardUsage(id).costUsd));
+
+    // One criterion that isn't a confident no (here: touches auth) leaves the decision to the LLM.
+    const { approvalByJev, singleChangeByJev } = await import('../server/decisions.ts');
+    respond = (q) => (q.credentials ? { credentials: noul(0.02), sensitive: noul(0.6), open_ux: noul(0.05), assumptions: noul(0.04), review_requested: noul(0.02) }
+      : q.single_change ? { single_change: noul(0.85) } : null);
+    assert.equal(await approvalByJev(done, db.listSubtasks(id), { projectId: DEMO, cardId: id }), null);
+    assert.equal(await singleChangeByJev(done, { projectId: DEMO, cardId: id }), false, 'unsure means plan as usual');
+
+    // When Jev fails, everything falls back to the old path.
+    respond = () => null;
+    assert.equal((await api('POST', '/api/instructions', { description: 'Fix it', projectId: DEMO })).body.type, 'done');
+
+    // Switched off, or removed, it isn't asked at all.
+    const before = asked.length;
+    assert.equal((await api('PUT', '/api/jev', { enabled: false })).body.enabled, false);
+    runs = adaRuns();
+    await ask('how are things looking?');
+    assert.ok(adaRuns() > runs, 'the assistant model answers again');
+    assert.equal(asked.length, before);
+    assert.deepEqual((await api('DELETE', '/api/jev')).body, { configured: false, enabled: true, model: 'jev-latest' });
+  } finally {
+    await api('DELETE', '/api/jev');
+    delete process.env.TYPESAFE_BASE_URL;
+    fake.close();
+  }
+});
+
+// ---------------------------------------------------------------- usage reports
+
+test('usage reports show tokens and estimated cost per day and per model, for all projects or one', async () => {
+  const shopRepo = path.join(dataDir, 'usage-shop');
+  fs.mkdirSync(shopRepo, { recursive: true });
+  await git(shopRepo, 'init', '-q', '-b', 'main');
+  const shop = await api('POST', '/api/projects', { name: 'Usage shop', settings: { repoPath: shopRepo } });
+  assert.equal(shop.status, 201, shop.raw);
+  const projectId: number = shop.body.id;
+  const day = (offset: number) => {
+    const d = new Date();
+    d.setHours(12, 0, 0, 0);
+    d.setDate(d.getDate() - offset);
+    return d;
+  };
+  const key = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const run = (offset: number, model: string, projectIdFor: number, tokens: number, cost: number) => db.addUsage({
+    projectId: projectIdFor, cardId: null, profileId: null, model, ts: day(offset).getTime(),
+    inputTokens: tokens, outputTokens: tokens / 10, cacheReadTokens: tokens * 2, cacheWriteTokens: 0, costUsd: cost,
+  });
+  const before = (await api('GET', `/api/usage/report?days=7&projectId=${projectId}`)).body;
+  run(0, 'report-opus', projectId, 1000, 0.5);
+  run(0, 'report-haiku', projectId, 4000, 0.04);
+  run(3, 'report-opus', projectId, 2000, 1.0);
+  run(10, 'report-opus', projectId, 9000, 9.0); // outside a 7-day range
+
+  const week = (await api('GET', `/api/usage/report?days=7&projectId=${projectId}`)).body;
+  assert.equal(week.days.length, 7, 'every day, oldest first, even without runs');
+  assert.equal(week.days.at(-1).day, key(day(0)));
+  assert.equal(week.days.at(-1).inputTokens - before.days.at(-1).inputTokens, 5000);
+  assert.equal(week.days.at(-4).day, key(day(3)));
+  assert.equal(week.days.at(-4).outputTokens - before.days.at(-4).outputTokens, 200);
+  const models = Object.fromEntries(week.models.map((m: any) => [m.model, m]));
+  assert.deepEqual([models['report-opus'].runs, models['report-opus'].inputTokens, models['report-opus'].costUsd], [2, 3000, 1.5]);
+  assert.deepEqual([models['report-haiku'].cacheReadTokens, models['report-haiku'].costUsd], [8000, 0.04]);
+  assert.equal(week.models[0].model, 'report-opus', 'most expensive first');
+  assert.ok(Math.abs(week.total.costUsd - before.total.costUsd - 1.54) < 1e-9);
+
+  const fortnight = (await api('GET', `/api/usage/report?days=14&projectId=${projectId}`)).body;
+  assert.equal(fortnight.days.length, 14);
+  assert.equal(Object.fromEntries(fortnight.models.map((m: any) => [m.model, m]))['report-opus'].runs, 3);
+  // All projects include this one; another project's report doesn't.
+  assert.ok((await api('GET', '/api/usage/report?days=7')).body.models.some((m: any) => m.model === 'report-haiku'));
+  assert.ok(!(await api('GET', `/api/usage/report?days=7&projectId=${DEMO}`)).body.models.some((m: any) => m.model === 'report-haiku'));
+  for (const bad of ['0', '400', 'week']) assert.equal((await api('GET', `/api/usage/report?days=${bad}`)).status, 400);
+  assert.equal((await api('GET', '/api/usage/report?days=7&projectId=9999')).status, 404);
 });

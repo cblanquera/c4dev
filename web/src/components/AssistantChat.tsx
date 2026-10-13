@@ -8,6 +8,7 @@ import { AgentName } from './AgentName.tsx';
 import { CardChip } from './CardChip.tsx';
 import { DirectoryContext, assistantOf, providerLabel, useAgentLabel } from '../agents.ts';
 import type { AssistantMessage, AssistantState, Card, Project } from '../../../server/types.ts';
+import { STATUS_QUESTION } from '../../../server/types.ts';
 
 interface Props {
   assistant: AssistantState;
@@ -23,7 +24,7 @@ const KIND_LABEL: Record<AssistantMessage['kind'], string> = {
 };
 
 const QUICK_ASKS = [
-  { label: 'Status', text: 'What is the status of all projects?' },
+  { label: 'Status', text: STATUS_QUESTION },
   { label: 'Needs me', text: 'What needs me?' },
 ];
 

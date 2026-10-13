@@ -89,7 +89,7 @@ test('a CLI run stops at its turn and time limits, as a failure', async () => {
     const driver = new CliDriver('codex', () => '');
     const ctx = (limits: { maxTurns: number; runMinutes: number }) => ({
       signal: new AbortController().signal, log: () => {}, usage: () => {},
-      profile: { id: 1, name: 'Grace', job: 'coordinator' as const, title: 'Coordinator', context: '', model: '', skills: [], pluginDir: null, limits },
+      profile: { id: 1, name: 'Grace', job: 'coordinator' as const, title: 'Coordinator', context: '', model: '', skills: [], pluginDir: null, limits, contexts: [] },
     });
     const card = { id: 1, title: 't', instructions: 'i' } as any;
     const started = Date.now();
@@ -100,4 +100,41 @@ test('a CLI run stops at its turn and time limits, as a failure', async () => {
     process.env.PATH = PATH;
     fs.rmSync(bin, { recursive: true, force: true });
   }
+});
+
+test('contexts reach each CLI as MCP servers, with secrets in the environment, never on the command line', async () => {
+  const { cliEnv } = await import('../server/agents/cli.ts');
+  const stdio = { name: 'secrets', transport: 'stdio' as const, command: 'node', args: ['server.mjs'], env: { SECRET_WORD: 'pelican-42' }, url: '', headers: {}, readOnly: false };
+  const http = { name: 'docs', transport: 'http' as const, command: '', args: [], env: {}, url: 'https://mcp.example.com/mcp', headers: { Authorization: 'Bearer sk-live-1' }, readOnly: true };
+  const contexts = [stdio, http];
+
+  const codex = cliCommand({ provider: 'codex', cwd: '/repo', prompt: 'Build this', model: '', access: 'write', contexts });
+  assert.ok(codex.includes('mcp_servers.secrets.command="node"') && codex.includes('mcp_servers.secrets.args=["server.mjs"]'));
+  assert.ok(codex.includes('mcp_servers.secrets.env_vars=["SECRET_WORD"]'), 'the value is forwarded from the environment');
+  assert.ok(codex.includes('mcp_servers.secrets.default_tools_approval_mode="approve"'), "codex exec can't ask, so attaching the context approves it");
+  assert.deepEqual(parseLine('codex', JSON.stringify({ type: 'item.started', item: { type: 'mcp_tool_call', server: 'secrets', tool: 'secret_word' } }), '/repo', ''), { tool: 'MCP secrets.secret_word' });
+  assert.ok(codex.includes('mcp_servers.docs.url="https://mcp.example.com/mcp"'));
+  assert.ok(codex.includes('mcp_servers.docs.env_http_headers={ "Authorization" = "FACTORY_MCP_1_0" }'));
+  assert.ok(!codex.join(' ').includes('pelican-42') && !codex.join(' ').includes('sk-live-1'), 'no secret on the command line');
+  assert.deepEqual(cliEnv('codex', contexts), { SECRET_WORD: 'pelican-42', FACTORY_MCP_1_0: 'Bearer sk-live-1' });
+
+  // Codex hides credential-looking variables from commands unless a worker was given secrets.
+  assert.ok(!codex.includes('shell_environment_policy.ignore_default_excludes=true'));
+  assert.ok(cliCommand({ provider: 'codex', cwd: '/repo', prompt: 'p', model: '', access: 'write', secrets: true }).includes('shell_environment_policy.ignore_default_excludes=true'));
+  assert.ok(!cliCommand({ provider: 'codex', cwd: '/repo', prompt: 'p', model: '', access: 'read', secrets: true }).includes('shell_environment_policy.ignore_default_excludes=true'));
+
+  const opencode = JSON.parse(cliEnv('opencode', contexts).OPENCODE_CONFIG_CONTENT);
+  assert.deepEqual(opencode.mcp.secrets, { type: 'local', command: ['node', 'server.mjs'], environment: { SECRET_WORD: 'pelican-42' }, enabled: true });
+  assert.deepEqual(opencode.mcp.docs, { type: 'remote', url: 'https://mcp.example.com/mcp', headers: { Authorization: 'Bearer sk-live-1' }, enabled: true });
+  assert.deepEqual(cliEnv('pi', contexts), {}, 'Pi has no MCP support');
+  assert.deepEqual(cliEnv('codex', []), {});
+});
+
+test('knowledge folders need no MCP server: OpenCode is allowed to read them, every other CLI already can', async () => {
+  const { cliEnv } = await import('../server/agents/cli.ts');
+  const folder = { name: 'kb', transport: 'folder' as const, folder: '/work/kb', entry: '/work/kb/AGENTS.md', entryText: '# KB', command: '', args: [], env: {}, url: '', headers: {}, readOnly: true };
+  assert.deepEqual(JSON.parse(cliEnv('opencode', [folder]).OPENCODE_CONFIG_CONTENT), { permission: { external_directory: { '/work/kb/**': 'allow' } } });
+  assert.deepEqual(cliEnv('codex', [folder]), {});
+  assert.deepEqual(cliEnv('pi', [folder]), {});
+  assert.ok(!cliCommand({ provider: 'codex', cwd: '/repo', prompt: 'p', model: '', access: 'read', contexts: [] }).join(' ').includes('mcp_servers'));
 });

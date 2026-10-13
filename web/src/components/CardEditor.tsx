@@ -28,6 +28,8 @@ export function CardEditor({ card, projectId, parentId, cards, onSaved, onDelete
   /** The description the current instructions were generated from. */
   const [generatedFor, setGeneratedFor] = useState<string | null>(card?.instructionsCurrent ? card.description : null);
   const [generating, setGenerating] = useState(false);
+  /** Jev's note that the description is too vague to write instructions from. */
+  const [vague, setVague] = useState('');
   const [activity, setActivity] = useState<string[]>([]);
   const [editingInstructions, setEditingInstructions] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -45,7 +47,7 @@ export function CardEditor({ card, projectId, parentId, cards, onSaved, onDelete
     : stale ? 'Instructions are outdated'
     : '';
 
-  async function generate() {
+  async function generate(force = false) {
     if (!description.trim()) return onError('Describe the task first.');
     abortRef.current?.abort();
     const controller = new AbortController();
@@ -53,6 +55,7 @@ export function CardEditor({ card, projectId, parentId, cards, onSaved, onDelete
     const source = description;
     setGenerating(true);
     setActivity([]);
+    setVague('');
     setEditingInstructions(false);
     let streamed = '';
     try {
@@ -62,7 +65,11 @@ export function CardEditor({ card, projectId, parentId, cards, onSaved, onDelete
           streamed += chunk;
           setInstructions(streamed);
         },
-      }, controller.signal);
+      }, controller.signal, force);
+      if ('vague' in result) {
+        setVague(result.vague);
+        return;
+      }
       setInstructions(result.instructions);
       setHash(result.hash);
       setGeneratedFor(source);
@@ -128,7 +135,7 @@ export function CardEditor({ card, projectId, parentId, cards, onSaved, onDelete
           {hasInstructions && !generating && (
             <button className="ghost small" onClick={() => setEditingInstructions((v) => !v)}>{editingInstructions ? 'Done editing' : 'Edit'}</button>
           )}
-          <button className={hasInstructions && !stale ? 'secondary' : 'primary'} onClick={generating ? () => abortRef.current?.abort() : generate} disabled={!description.trim() && !generating}>
+          <button className={hasInstructions && !stale ? 'secondary' : 'primary'} onClick={generating ? () => abortRef.current?.abort() : () => generate()} disabled={!description.trim() && !generating}>
             <Icon name={generating ? 'square' : hasInstructions ? 'rotate-ccw' : 'sparkles'} />
             {generating ? 'Stop' : hasInstructions ? 'Regenerate' : 'Generate instructions'}
           </button>
@@ -138,8 +145,16 @@ export function CardEditor({ card, projectId, parentId, cards, onSaved, onDelete
           <div className="notice warn">
             The task changed since these instructions were generated.
             <span className="spacer" />
-            <button className="link small" onClick={generate}>Regenerate</button>
+            <button className="link small" onClick={() => generate()}>Regenerate</button>
             <button className="link small" onClick={() => { setGeneratedFor(description); setHash('current'); }}>Keep as is</button>
+          </div>
+        )}
+
+        {vague && !generating && (
+          <div className="notice warn" role="status">
+            {vague}
+            <span className="spacer" />
+            <button className="link small" onClick={() => generate(true)}>Generate anyway</button>
           </div>
         )}
 

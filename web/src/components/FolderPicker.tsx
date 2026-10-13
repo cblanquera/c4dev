@@ -1,11 +1,41 @@
 /**
  * Choosing a folder on this machine. A browser's own folder picker never
- * reveals a folder's real path, so folders are listed by the factory's server
- * (names only). Git repositories are marked.
+ * reveals a folder's real path, so the factory's server opens the operating
+ * system's folder dialog (`useChooseFolder`). Where there is none (headless
+ * machines), folders are listed by the server instead (names only), with git
+ * repositories marked.
  */
 import { Icon } from './Icon.tsx';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { api, type FolderListing } from '../api.ts';
+
+/** Opens the OS folder dialog; falls back to the in-app picker (`picker`, to render) where there's no dialog. */
+export function useChooseFolder(onChoose: (path: string) => void, onError: (message: string) => void): {
+  choose: (start: string, title?: string) => Promise<void>;
+  busy: boolean;
+  picker: ReactNode;
+} {
+  const [fallbackStart, setFallbackStart] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function choose(start: string, title?: string) {
+    setBusy(true);
+    try {
+      const result = await api.chooseFolder(start, title);
+      if (!result.supported) setFallbackStart(start);
+      else if (result.path) onChoose(result.path);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const picker = fallbackStart === null ? null : (
+    <FolderPicker start={fallbackStart} onClose={() => setFallbackStart(null)} onChoose={(path) => { setFallbackStart(null); onChoose(path); }} />
+  );
+  return { choose, busy, picker };
+}
 
 interface Props {
   /** Where to start; empty starts at the home folder. */

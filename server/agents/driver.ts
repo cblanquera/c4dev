@@ -6,6 +6,21 @@
 import type { AssistantMessage, Card, CardKind, Comment, DeliverableKind, LogLevel, MergeState, Stage, Subtask, SubtaskKind } from '../types.ts';
 import type { RunProfile } from '../profiles.ts';
 import type { RunLimits } from '../types.ts';
+import type { RunContext } from '../contexts.ts';
+
+/**
+ * The MCP servers a run may start: every context for a run that can write,
+ * only read-only ones otherwise, so a planner or reviewer can't write through
+ * an MCP tool.
+ */
+export function contextsFor(profile: RunProfile | null, canWrite: boolean): RunContext[] {
+  return (profile?.contexts ?? []).filter((c) => canWrite || c.readOnly);
+}
+
+/** The contexts that are MCP servers; knowledge folders need no server. */
+export const mcpContexts = (contexts: RunContext[]) => contexts.filter((c) => c.transport !== 'folder');
+/** Knowledge folders, which reach the run through its instructions (`profileBrief`) and file access. */
+export const folderContexts = (contexts: RunContext[]) => contexts.filter((c) => c.transport === 'folder' && c.folder);
 
 /** A run stopped at one of its caps: a failure like any other, so it counts toward the retry limits. */
 export function limitError(kind: 'turns' | 'time', limits: RunLimits): Error {

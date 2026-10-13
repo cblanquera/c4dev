@@ -5,6 +5,7 @@ import { AssistantChat } from './AssistantChat.tsx';
 import { usageLine } from '../format.ts';
 import { teamProviders } from '../agents.ts';
 import { ACTIVE_STAGES, type AgentProfile, type AssistantState, type Card, type Project, type UsageTotals } from '../../../server/types.ts';
+import { ProjectLogo } from './ProjectLogo.tsx';
 
 interface Props {
   projects: Project[];
@@ -57,6 +58,7 @@ function ProjectTile({ project, cards, usage, profiles, onError }: { project: Pr
     <div className="project-tile">
       <span className="project-tile-head">
         {/* The link covers the whole tile; the copy button sits above it. */}
+        <ProjectLogo url={project.settings.logoUrl} name={project.name} size={20} />
         <h3><a className="project-tile-link" href={`#project-${project.id}`} aria-label={`${project.name} board`}>{project.name}</a></h3>
         {project.settings.paused && <span className="badge subtle">Paused</span>}
         <span className={`badge ${runs.simulated ? 'd-approval' : 'subtle'}`} title="What this project's agents run on">{runs.label}</span>

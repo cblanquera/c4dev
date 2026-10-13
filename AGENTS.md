@@ -25,14 +25,18 @@ CI (`.github/workflows/ci.yml`) runs all three on Node 26 (`.nvmrc`). Without de
 | `server/types.ts` | Domain types shared with the client. No Node imports here. |
 | `server/db.ts` | SQLite via `node:sqlite`. **Every mutation emits a `FactoryEvent`.** Also versions, backs up and migrates the schema. |
 | `server/crypto.ts` | AES-256-GCM sealing for card secrets, with the key in `secret.key` (or `FACTORY_SECRET_KEY`). |
+| `server/jev.ts` | Jev (TypeSafe's decision model), optional: the encrypted API key, on/off, and `ask`, which returns null whenever Jev can't answer. |
+| `server/decisions.ts` | Routine decisions Jev settles when confident (needs a human, skip planning, too vague, status question); null means "use the LLM as before". |
 | `server/budget.ts` | Monthly budgets per project and per agent (cost and tokens), checked before every run. |
 | `server/transfer.ts` | Export and import of the setup: skills, agents, projects (never cards or secrets). |
 | `server/settings.ts` | Per-project settings (cached, defaults merged), model lists and provider defaults. |
 | `server/factory.ts` | One coordinator per project; routes card work to the card's coordinator. |
 | `server/profiles.ts` | Agent profiles, the skills library and per-profile plugin folders, team assignment (`pickProfile`, `needsFor`). |
 | `server/providers.ts` | Agent CLIs on this machine (detection, on/off) and `assertUsable` for every driver choice. |
+| `server/contexts.ts` | The contexts library (MCP servers): validation, encrypted env/header values, `resolveContext` (environment-sourced values, working directory) and `runContexts` for runs, and the Check (initialize + tools/list over stdio or HTTP). |
 | `server/skill-import.ts` | Importing skills from GitHub and skills.sh (shallow clone, then scan for SKILL.md). |
 | `server/errors.ts` | `HttpError`. |
+| `server/native-dialog.ts` | The OS folder dialog behind every Choose… button, with the in-app picker as fallback. |
 | `server/auth.ts` | The API guard: loopback hosts only, no other origins, and the per-install token written into `index.html`. |
 | `server/coordinator.ts` | The state machine for one project. The only code that moves cards past the Backlog. |
 | `server/assistant.ts` | The cross-project assistant: validates and performs its actions, posts notifications and relays. |
@@ -61,6 +65,7 @@ CI (`.github/workflows/ci.yml`) runs all three on Node 26 (`.nvmrc`). Without de
   - Enforce new rules on the server (`app.ts` / `coordinator.ts` / `assistant.ts`), not only in the UI.
 - **New tasks always land in the Icebox.** Never queue a task as part of creating it. Only integration cards (merge, pull, push) are created in the Backlog, by the coordinator.
 - **Every agent run is done by a profile.** Build contexts with `Coordinator.ctx(…, profile)` so logs carry `profileId`, usage is recorded and budgets are checked (`assertBudget`); report usage from drivers through `ctx.usage`. A run over a budget throws `BudgetError`: workers' subtasks wait as blocked (no attempt used), other runs send the card to Deliverables, and a project over budget pauses.
+- **Jev is an optimisation, never a dependency.** Every Jev-backed decision returns null unless Jev is added, switched on and confident, and the caller then takes the LLM path it always had. Only skip a run on a confident answer in the cheap direction (e.g. "nothing needs a human" only when every criterion is a confident no). Ask atomic questions and combine them in code. Jev usage is recorded with no agent, costed at TypeSafe's estimate (`JEV_USD_PER_INPUT_TOKEN`: $0.042 per million input tokens, output free). Tests point `TYPESAFE_BASE_URL` at a stand-in; never call the real API from tests.
 - **Every run is capped** by `ctx.profile.limits` (turns and minutes, Settings → Limits). Drivers stop a run at either cap and throw `limitError`, a plain failure that counts toward the retry limits. A new driver must enforce both.
 - **Everything card-related is project scoped.** Cards need a `projectId`; columns, positions and coordinators are per project. Read settings with `settings(projectId)`, never a global.
 - **Persist through `db.ts`** so clients are notified. Don't write to SQLite anywhere else.
@@ -80,6 +85,8 @@ CI (`.github/workflows/ci.yml`) runs all three on Node 26 (`.nvmrc`). Without de
   - merge subtasks really run the `git merge` named in their instructions, keeping this card's side of conflicts;
   - every run reports estimated tokens at zero cost as model `simulated`, and workers log `Using skills: …`;
   - the assistant reads intents anywhere in a sentence, names projects by name or repository folder, and reads "it" as the card last shown. New-task requests always win over card actions, and questions never act. Add a unit test for any phrasing you teach it.
+- **Knowledge folders** (`transport: 'folder'`) aren't MCP servers: `profileBrief` inlines each entry document, and drivers grant read access to the folder (Claude `additionalDirectories`, OpenCode `permission.external_directory`). Use `mcpContexts` / `folderContexts` to tell them apart; never start a folder as a server.
+- **Contexts (MCP servers)** reach runs through `ctx.profile.contexts`; drivers must start only `contextsFor(profile, canWrite)`, so read-only roles get read-only contexts and nothing else. Their env and header values are secrets: pass them through the environment (Codex `env_vars` / `env_http_headers`, OpenCode `OPENCODE_CONFIG_CONTENT`), never on a command line or in logs. Pi has no MCP support and skips them.
 - **Secrets** go through `db.setSecrets` / `getSecrets` only; they're encrypted at rest. Never put secret values in logs, comments, events, exports or the `Card` sent to clients (only `secretNames`).
 - **Schema changes:** add columns with `addColumn` in `openDb` (idempotent). A change that rewrites data goes in `MIGRATIONS` under a new `SCHEMA_VERSION`; the database is backed up before it runs, and a newer database is refused.
 - **Models:** the default is `claude-opus-5-5`. Don't hardcode model IDs outside `settings.ts` (`CLAUDE_MODELS`).
@@ -103,6 +110,8 @@ CI (`.github/workflows/ci.yml`) runs all three on Node 26 (`.nvmrc`). Without de
 - **Playwright projects share one server and database**, including the one assistant conversation. Make test data unique per project (e.g. include `test.info().project.name`).
 - **`/` is the home screen now.** Board specs start at `DEMO_BOARD` (`/#project-1`), the demo project every fresh factory creates.
 - **Assistant notifications are deferred one tick** so the coordinator's question, posted right after a card moves, is included. Tests should poll for them.
+- **Codex blocks MCP tool calls in `codex exec`** ("requires approval, but approval policy is never") unless the server sets `default_tools_approval_mode="approve"`; `codexContexts` does. Codex also hides `*KEY*`/`*SECRET*`/`*TOKEN*` variables from commands, so workers with card secrets get `shell_environment_policy.ignore_default_excludes=true`.
+- **Tests never open OS dialogs.** Server tests pass a `chooseFolder` stub to `createApp`; `test:e2e` sets `FACTORY_NATIVE_DIALOGS=0`, so specs drive the in-app folder picker.
 - **Every API call needs the install's token.** The UI reads it from the page (`API_TOKEN` in `web/src/api.ts`); add `AUTH` to any new `fetch`. Server tests pass it to `createApp`; e2e specs import `test` from `e2e/helpers.ts` so `request` carries it. Node's `fetch` ignores a custom `Host` header; use `node:http` to test one.
 - **HTML5 drag & drop doesn't work on touch.** Every drag action needs a button equivalent (e.g. "Move to Backlog").
 

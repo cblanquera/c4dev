@@ -14,6 +14,7 @@ export const DATA_DIR = path.resolve(process.env.FACTORY_DATA ?? '.factory');
 export function defaultSettings(): Settings {
   return {
     repoPath: path.join(DATA_DIR, 'demo-repo'),
+    logoUrl: '',
     baseBranch: 'main',
     maxActiveCards: 2,
     maxWorkers: 3,
@@ -38,6 +39,20 @@ export function defaultSettings(): Settings {
     budgetUsd: 0,
     budgetTokens: 0,
   };
+}
+
+/** A logo is an uploaded image or an http(s) link to one; empty means the factory's own. */
+export function cleanLogo(value: unknown): string {
+  const logo = String(value ?? '').trim();
+  if (!logo || /^\/uploads\/[\w.-]+$/.test(logo)) return logo;
+  let url: URL;
+  try {
+    url = new URL(logo);
+  } catch {
+    throw new HttpError(400, 'A logo is an uploaded image or an https:// link to one');
+  }
+  if ((url.protocol !== 'https:' && url.protocol !== 'http:') || logo.length > 2000) throw new HttpError(400, 'A logo is an uploaded image or an https:// link to one');
+  return logo;
 }
 
 export const DEFAULT_LIMITS: RunLimits = { maxTurns: 200, runMinutes: 60 };

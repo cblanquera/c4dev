@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useReducer, useRef } from 'react';
 import { API_TOKEN, api } from './api.ts';
 import type {
-  AgentProfile, AssistantState, Card, CardDetail, FactoryEvent, FactoryState, Project, ProviderStatus, Settings, Skill, UsageRecord, UsageTotals,
+  AgentProfile, AssistantState, Context, Card, CardDetail, FactoryEvent, FactoryState, Project, ProviderStatus, Settings, Skill, UsageRecord, UsageTotals,
 } from '../../server/types.ts';
 
 export interface FeedItem {
@@ -27,8 +27,12 @@ interface State {
   projects: Map<number, Project>;
   profiles: Map<number, AgentProfile>;
   skills: Map<number, Skill>;
+  contexts: Map<number, Context>;
   usage: FactoryState['usage'];
   limits: FactoryState['limits'] | null;
+  jev: FactoryState['jev'] | null;
+  /** Bumped on every recorded run, so usage reports know to refresh. */
+  usageVersion: number;
   providers: ProviderStatus[];
   projectDefaults: Settings | null;
   assistant: AssistantState | null;
@@ -62,8 +66,10 @@ function reducer(state: State, action: Action): State {
         projects: new Map(action.state.projects.map((p) => [p.id, p])),
         profiles: new Map(action.state.profiles.map((p) => [p.id, p])),
         skills: new Map(action.state.skills.map((s) => [s.id, s])),
+        contexts: new Map(action.state.contexts.map((c) => [c.id, c])),
         usage: action.state.usage,
         limits: action.state.limits,
+        jev: action.state.jev,
         providers: action.state.providers,
         projectDefaults: action.state.projectDefaults,
         assistant: action.state.assistant,
@@ -103,6 +109,13 @@ function reducer(state: State, action: Action): State {
           skills.delete(e.id);
           return { ...state, skills };
         }
+        case 'context':
+          return { ...state, contexts: new Map(state.contexts).set(e.context.id, e.context) };
+        case 'context_removed': {
+          const contexts = new Map(state.contexts);
+          contexts.delete(e.id);
+          return { ...state, contexts };
+        }
         case 'usage': {
           const r = e.record;
           const { byProject, byProfile, month } = state.usage;
@@ -119,10 +132,13 @@ function reducer(state: State, action: Action): State {
               },
             },
             detail: d && d.card.id === r.cardId ? { ...d, usage: addRun(d.usage, r) } : d,
+            usageVersion: state.usageVersion + 1,
           };
         }
         case 'limits':
           return { ...state, limits: e.limits };
+        case 'jev':
+          return { ...state, jev: e.jev };
         case 'coordinator':
           return { ...state, feed: [{ projectId: e.projectId, text: e.text, ts: e.ts }, ...state.feed].slice(0, 50) };
         case 'assistant_message':
@@ -145,7 +161,7 @@ function reducer(state: State, action: Action): State {
 
 export function useFactory(openCardId: number | null) {
   const [state, dispatch] = useReducer(reducer, {
-    cards: new Map(), projects: new Map(), profiles: new Map(), skills: new Map(), providers: [], limits: null,
+    cards: new Map(), projects: new Map(), profiles: new Map(), skills: new Map(), contexts: new Map(), providers: [], limits: null, jev: null, usageVersion: 0,
     usage: { byProject: {}, byProfile: {}, month: { since: 0, byProject: {}, byProfile: {} } },
     projectDefaults: null, assistant: null, feed: [], detail: null, connected: false,
   });

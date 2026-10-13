@@ -1,6 +1,6 @@
 /** Thin typed client for the factory API. */
 import type {
-  AgentProfile, Card, CardDetail, FactoryState, Project, ProjectProcess, ProviderId, ProviderStatus, RunLimits, Settings, Skill, Stage, UsageTotals,
+  AgentProfile, Card, CardDetail, Context, FactoryState, JevStatus, UsageReport, Project, ProjectProcess, ProviderId, ProviderStatus, RunLimits, Settings, Skill, Stage, UsageTotals,
 } from '../../server/types.ts';
 
 export interface FolderListing {
@@ -25,7 +25,26 @@ export interface Backups {
   backups: { name: string; path: string; bytes: number; createdAt: number }[];
 }
 
-export type ProfileInput = Pick<AgentProfile, 'name' | 'job' | 'title' | 'provider' | 'context' | 'imageUrl' | 'model' | 'skillIds' | 'budgetUsd' | 'budgetTokens'>;
+export type ProfileInput = Pick<AgentProfile, 'name' | 'job' | 'title' | 'provider' | 'context' | 'imageUrl' | 'model' | 'skillIds' | 'contextIds' | 'budgetUsd' | 'budgetTokens'>;
+
+/** A context as the editor sends it. Secret values: a string replaces, null keeps the saved one, a missing name removes it. */
+export interface ContextInput {
+  name: string;
+  description: string;
+  transport: Context['transport'];
+  folder: string;
+  command: string;
+  args: string[];
+  cwd: string;
+  envPassthrough: string[];
+  url: string;
+  bearerTokenEnv: string;
+  envHeaders: Record<string, string>;
+  env: Record<string, string | null>;
+  headers: Record<string, string | null>;
+  readOnly: boolean;
+  enabled?: boolean;
+}
 
 /** This install's API token, written into the page by the server (see server/auth.ts). */
 export const API_TOKEN = document.querySelector<HTMLMetaElement>('meta[name="factory-token"]')?.content ?? '';
@@ -81,11 +100,20 @@ export const api = {
   ask: (body: string) => request<void>('POST', '/api/assistant/messages', { body }),
   refreshProviders: () => request<ProviderStatus[]>('POST', '/api/providers/refresh'),
   setProvider: (id: ProviderId, enabled: boolean) => request<ProviderStatus[]>('PATCH', `/api/providers/${id}`, { enabled }),
+  createContext: (body: ContextInput) => request<Context>('POST', '/api/contexts', body),
+  updateContext: (id: number, body: Partial<ContextInput>) => request<Context>('PATCH', `/api/contexts/${id}`, body),
+  removeContext: (id: number) => request<void>('DELETE', `/api/contexts/${id}`),
+  checkContext: (id: number) => request<{ server: string; tools: string[]; files?: number }>('POST', `/api/contexts/${id}/check`),
+  saveJev: (body: { apiKey?: string; model?: string; enabled?: boolean }) => request<JevStatus>('PUT', '/api/jev', body),
+  removeJev: () => request<JevStatus>('DELETE', '/api/jev'),
+  usageReport: (days: number, projectId?: number) =>
+    request<UsageReport>('GET', `/api/usage/report?days=${days}${projectId === undefined ? '' : `&projectId=${projectId}`}`),
   setLimits: (limits: Partial<RunLimits>) => request<RunLimits>('PATCH', '/api/limits', limits),
   exportData: () => request<unknown>('GET', '/api/export'),
   importData: (bundle: unknown) => request<SkillImport>('POST', '/api/import', bundle),
   backups: () => request<Backups>('GET', '/api/backups'),
   backup: () => request<Backups['backups'][number]>('POST', '/api/backups'),
+  chooseFolder: (start: string, title?: string) => request<{ path: string | null; supported: boolean }>('POST', '/api/fs/choose-folder', { start, title }),
   folders: (path: string, hidden: boolean) => request<FolderListing>('GET', `/api/fs/dirs?path=${encodeURIComponent(path)}${hidden ? '&hidden=1' : ''}`),
 
   async upload(file: File): Promise<string> {
@@ -102,11 +130,13 @@ export const api = {
     cardId: number | null,
     on: { status: (text: string) => void; text: (chunk: string) => void },
     signal: AbortSignal,
-  ): Promise<{ instructions: string; hash: string }> {
+    /** Write them even if Jev finds the description too vague. */
+    force = false,
+  ): Promise<{ instructions: string; hash: string } | { vague: string }> {
     const res = await fetch('/api/instructions', {
       method: 'POST',
       headers: { ...AUTH, 'content-type': 'application/json' },
-      body: JSON.stringify({ description, projectId, cardId }),
+      body: JSON.stringify({ description, projectId, cardId, force }),
       signal,
     });
     if (!res.ok || !res.body) throw new Error((await res.json().catch(() => ({}))).error ?? 'Generation failed');
@@ -123,6 +153,7 @@ export const api = {
         if (event.type === 'status') on.status(event.text);
         else if (event.type === 'text') on.text(event.text);
         else if (event.type === 'error') throw new Error(event.text);
+        else if (event.type === 'vague') return { vague: event.text };
         else if (event.type === 'done') return { instructions: event.instructions, hash: event.hash };
       }
     }

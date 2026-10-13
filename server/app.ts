@@ -10,7 +10,7 @@ import { HttpError, backlogBlocker } from './coordinator.ts';
 import type { Factory } from './factory.ts';
 import type { Assistant } from './assistant.ts';
 import {
-  DATA_DIR, createProject, defaultSettings, getProject, listProjects, pickSettings, refreshRemote, runLimits, setRunLimits, settings, updateProject,
+  DATA_DIR, cleanLogo, createProject, defaultSettings, getProject, listProjects, pickSettings, refreshRemote, runLimits, setRunLimits, settings, updateProject,
 } from './settings.ts';
 import { deleteSkill, importSkills, pickProfile, removeProfile, runProfile, saveProfile, saveSkill, skillContent, skillFiles } from './profiles.ts';
 import { importFromGithub, importFromSkillsSh } from './skill-import.ts';
@@ -22,11 +22,15 @@ const largeJson = express.json({ limit: '60mb' });
 /** Folders listed per request by the folder browser; type a path for anything beyond. */
 const MAX_FOLDERS = 5000;
 import { assertRepo } from './git.ts';
-import { STAGES, type CardDetail, type FactoryState, type Settings, type Stage } from './types.ts';
+import { STAGES, type CardDetail, type FactoryState, type Settings, type Stage, type UsageReport } from './types.ts';
 import { deliveryNotes } from './delivery.ts';
 import { DevmetricsProcesses, type ProcessManager } from './processes.ts';
 import { guard, withToken } from './auth.ts';
 import { exportFactory, importFactory } from './transfer.ts';
+import { checkContext, deleteContext, saveContext } from './contexts.ts';
+import { chooseFolderNatively, type ChooseFolder } from './native-dialog.ts';
+import { jevStatus, removeJev, saveJev } from './jev.ts';
+import { vagueByJev } from './decisions.ts';
 import { assertBudget, cleanBudget, monthStart } from './budget.ts';
 import { KEY_FILE } from './crypto.ts';
 
@@ -64,6 +68,7 @@ async function validateProject(name: string, patch: Partial<Settings>, selfId: n
     const known = new Set(db.activeProfiles().map((p) => p.id));
     patch.team = [...new Set(patch.team.map(Number))].filter((id) => known.has(id));
   }
+  if (patch.logoUrl !== undefined) patch.logoUrl = cleanLogo(patch.logoUrl);
   if (patch.budgetUsd !== undefined) patch.budgetUsd = cleanBudget(patch.budgetUsd, 'usd');
   if (patch.budgetTokens !== undefined) patch.budgetTokens = cleanBudget(patch.budgetTokens, 'tokens');
   if (patch.repoPath === undefined) return;
@@ -93,9 +98,11 @@ interface AppOptions {
   /** This install's API token (see auth.ts). */
   token: string;
   processes?: ProcessManager;
+  /** The OS folder dialog; tests swap in a stub. */
+  chooseFolder?: ChooseFolder;
 }
 
-export function createApp(factory: Factory, assistant: Assistant, { token, processes = new DevmetricsProcesses(projectRoots) }: AppOptions) {
+export function createApp(factory: Factory, assistant: Assistant, { token, processes = new DevmetricsProcesses(projectRoots), chooseFolder = chooseFolderNatively }: AppOptions) {
   const app = express();
   app.disable('x-powered-by');
   app.use(guard(token));
@@ -114,11 +121,47 @@ export function createApp(factory: Factory, assistant: Assistant, { token, proce
       assistant: { messages: db.listAssistantMessages(), busy: assistant.busy },
       profiles: db.listProfiles(),
       skills: db.listSkills(),
+      contexts: db.listContexts(),
       providers: providerStatuses(),
+      jev: jevStatus(),
       usage: { byProject: db.usageBy('project_id'), byProfile: db.usageBy('profile_id'), month: monthUsage() },
       limits: runLimits(),
     };
     res.json(state);
+  });
+
+  // ---------------------------------------------------------------- Jev (optional decision model)
+
+  app.put('/api/jev', asyncRoute(async (req, res) => {
+    res.json(await saveJev(req.body ?? {}));
+  }));
+
+  app.delete('/api/jev', (_req, res) => {
+    res.json(removeJev());
+  });
+
+  /** Usage per day and per model over the last `days` days (today included), for one project or all. */
+  app.get('/api/usage/report', (req, res) => {
+    const days = Number(req.query.days ?? 7);
+    if (!Number.isInteger(days) || days < 1 || days > 366) throw new HttpError(400, 'days is a whole number from 1 to 366');
+    const projectId = req.query.projectId === undefined ? undefined : mustGetProject(req.query.projectId).id;
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    start.setDate(start.getDate() - (days - 1));
+    const key = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const recorded = new Map(db.usageByDay(start.getTime(), projectId).map((d) => [d.day, d]));
+    const zero = { runs: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 };
+    const series = Array.from({ length: days }, (_, i) => {
+      const day = new Date(start);
+      day.setDate(start.getDate() + i);
+      return recorded.get(key(day)) ?? { day: key(day), ...zero };
+    });
+    const total = series.reduce((sum, d) => ({
+      runs: sum.runs + d.runs, inputTokens: sum.inputTokens + d.inputTokens, outputTokens: sum.outputTokens + d.outputTokens,
+      cacheReadTokens: sum.cacheReadTokens + d.cacheReadTokens, cacheWriteTokens: sum.cacheWriteTokens + d.cacheWriteTokens, costUsd: sum.costUsd + d.costUsd,
+    }), zero);
+    const report: UsageReport = { days: series, models: db.usageByModel(start.getTime(), projectId), total };
+    res.json(report);
   });
 
   app.patch('/api/limits', (req, res) => {
@@ -295,6 +338,14 @@ export function createApp(factory: Factory, assistant: Assistant, { token, proce
     res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-cache' });
     const send = (obj: unknown) => res.write(`${JSON.stringify(obj)}\n`);
     try {
+      // With Jev, a description too vague to work from is sent back before the instructions run; the user can still insist.
+      if (req.body?.force !== true) {
+        const vague = await vagueByJev(description, { projectId: project.id, cardId: selfId ?? null }, controller.signal);
+        if (vague) {
+          send({ type: 'vague', text: vague });
+          return void res.end();
+        }
+      }
       const writer = pickProfile(project.id, 'coordinator');
       assertBudget(project.id, writer);
       const instructions = await factory.driver(writer.provider).generateInstructions(
@@ -415,6 +466,25 @@ export function createApp(factory: Factory, assistant: Assistant, { token, proce
     res.status(204).end();
   });
 
+  // ---------------------------------------------------------------- contexts (MCP servers)
+
+  app.post('/api/contexts', (req, res) => {
+    res.status(201).json(saveContext(req.body ?? {}));
+  });
+
+  app.patch('/api/contexts/:id', (req, res) => {
+    res.json(saveContext(req.body ?? {}, Number(req.params.id)));
+  });
+
+  app.delete('/api/contexts/:id', (req, res) => {
+    deleteContext(Number(req.params.id), (profile, contextIds) => saveProfile({ ...profile, contextIds }, profile.id));
+    res.status(204).end();
+  });
+
+  app.post('/api/contexts/:id/check', asyncRoute(async (req, res) => {
+    res.json(await checkContext(Number(req.params.id)));
+  }));
+
   app.get('/api/skills/:id', (req, res) => {
     const id = Number(req.params.id);
     const content = skillContent(id);
@@ -460,6 +530,21 @@ export function createApp(factory: Factory, assistant: Assistant, { token, proce
    * Folders for choosing a project's path: names only, never file contents.
    * The browser can't reveal a picked folder's real path, so the server lists them.
    */
+  /** Opens this machine's own folder dialog, starting at the nearest existing folder to `start`. */
+  app.post('/api/fs/choose-folder', asyncRoute(async (req, res) => {
+    let start = String(req.body?.start ?? '').trim().replace(/^~(?=$|\/)/, os.homedir());
+    start = start ? path.resolve(start) : os.homedir();
+    while (!fs.existsSync(start) && path.dirname(start) !== start) start = path.dirname(start);
+    const controller = new AbortController();
+    res.on('close', () => controller.abort());
+    const title = String(req.body?.title ?? 'Choose a folder').slice(0, 120);
+    try {
+      res.json(await chooseFolder(start, title, controller.signal));
+    } catch (err) {
+      throw new HttpError(409, err instanceof Error ? err.message : String(err));
+    }
+  }));
+
   app.get('/api/fs/dirs', (req, res) => {
     const requested = String(req.query.path ?? '').trim();
     const dir = path.resolve(requested || os.homedir());
